@@ -1,78 +1,58 @@
-document.addEventListener('DOMContentLoaded', () => {
-    const boardElement = document.getElementById('chessboard');
-    const game = new Chess();
-    const statusElement = document.getElementById('status-text');
-    const movesElement = document.getElementById('moves');
+// Import the functions you need from the SDKs you need
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-app.js";
+import { getAnalytics } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-analytics.js";
+// TODO: Add SDKs for Firebase products that you want to use
+// https://firebase.google.com/docs/web/setup#available-libraries
 
-    const board = Chessboard(boardElement, {
+// Your web app's Firebase configuration
+// For Firebase JS SDK v7.20.0 and later, measurementId is optional
+const firebaseConfig = {
+    apiKey: "AIzaSyC8ORguVAR-tG6QFawBrpUWxvy_FjcnDN0",
+    authDomain: "douchess2024.firebaseapp.com",
+    projectId: "douchess2024",
+    storageBucket: "douchess2024.appspot.com",
+    messagingSenderId: "849463658201",
+    appId: "1:849463658201:web:e2b9f22e0c25d56f49e0c8",
+    measurementId: "G-KSZ64T6XW6"
+};
+
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
+const analytics = getAnalytics(app);
+
+// Chessboard setup
+document.addEventListener("DOMContentLoaded", function() {
+    const board = Chessboard('chessboard', {
         draggable: true,
-        position: 'start',
-        onDragStart: (source, piece, position, orientation) => {
-            if (game.in_checkmate() || game.in_draw() || piece.search(/^b/) !== -1) {
-                return false;
-            }
-        },
-        onDrop: (source, target) => {
-            const move = game.move({
-                from: source,
-                to: target,
-                promotion: 'q'
-            });
-
-            if (move === null) {
-                return 'snapback';
-            }
-
-            updateStatus();
-            updateMoveHistory(move);
-        },
-        onMouseoutSquare: () => {
-            boardElement.querySelectorAll('.square-55d63').forEach(square => {
-                square.style.backgroundColor = '';
-            });
-        },
-        onMouseoverSquare: (square) => {
-            const moves = game.moves({
-                square,
-                verbose: true
-            });
-
-            if (moves.length === 0) return;
-
-            moves.forEach(move => {
-                document.querySelector(`.square-${move.to}`).style.backgroundColor = '#a9a9a9';
-            });
-        },
-        onSnapEnd: () => {
-            board.position(game.fen());
-        }
+        dropOffBoard: 'trash',
+        sparePieces: true
     });
 
-    function updateStatus() {
-        let status = '';
+    // Chess game logic (example)
+    const game = new Chess();
 
-        const moveColor = game.turn() === 'b' ? 'Black' : 'White';
+    // Handle piece drop
+    const onDrop = (source, target) => {
+        const move = game.move({
+            from: source,
+            to: target,
+            promotion: 'q' // always promote to a queen for simplicity
+        });
 
-        if (game.in_checkmate()) {
-            status = `Game over, ${moveColor} is in checkmate.`;
-        } else if (game.in_draw()) {
-            status = 'Game over, drawn position';
-        } else {
-            status = `${moveColor} to move`;
+        // Illegal move
+        if (move === null) return 'snapback';
+    };
 
-            if (game.in_check()) {
-                status += `, ${moveColor} is in check`;
-            }
-        }
+    // Set up the position after the piece snap
+    const onSnapEnd = () => {
+        board.position(game.fen());
+    };
 
-        statusElement.textContent = status;
-    }
-
-    function updateMoveHistory(move) {
-        const moveElement = document.createElement('li');
-        moveElement.textContent = move.san;
-        movesElement.appendChild(moveElement);
-    }
-
-    updateStatus();
+    // Configure the chessboard
+    board = Chessboard('chessboard', {
+        draggable: true,
+        position: 'start',
+        onDrop: onDrop,
+        onSnapEnd: onSnapEnd
+    });
 });
