@@ -26,9 +26,22 @@
             <h2>About Douchess</h2>
             <p>Douchess is your go-to platform for playing, learning, and mastering chess.</p>
         </section>
-        <section id="board">
-            <h2>Play Chess</h2>
-            <div id="chessboard" style="width: 400px;"></div>
+        <section id="play">
+            <div id="game-container">
+                <div id="board-container">
+                    <div id="chessboard" style="width: 400px;"></div>
+                </div>
+                <div id="info-container">
+                    <div id="move-history">
+                        <h3>Move History</h3>
+                        <ol id="moves"></ol>
+                    </div>
+                    <div id="status">
+                        <h3>Game Status</h3>
+                        <p id="status-text">Game in progress...</p>
+                    </div>
+                </div>
+            </div>
         </section>
     </main>
     <footer>
