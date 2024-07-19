@@ -31,6 +31,34 @@ main {
     padding: 20px;
 }
 
+#game-container {
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    margin-top: 20px;
+}
+
+#board-container {
+    margin-right: 20px;
+}
+
+#info-container {
+    display: flex;
+    flex-direction: column;
+}
+
+#move-history, #status {
+    background-color: #fff;
+    padding: 10px;
+    margin-bottom: 10px;
+    border: 1px solid #ddd;
+    border-radius: 5px;
+}
+
+#move-history ol {
+    padding-left: 20px;
+}
+
 footer {
     background-color: #333;
     color: #fff;
