@@ -12,41 +12,38 @@
 <body>
     <header>
         <h1>Welcome to Douchess</h1>
-        <nav>
-            <ul>
-                <li><a href="#">Home</a></li>
-                <li><a href="#">Play</a></li>
-                <li><a href="#">Learn</a></li>
-                <li><a href="#">Community</a></li>
-            </ul>
-        </nav>
     </header>
     <main>
-        <section id="about">
-            <h2>About Douchess</h2>
-            <p>Douchess is your go-to platform for playing, learning, and mastering chess.</p>
-        </section>
-        <section id="play">
-            <div id="game-container">
-                <div id="board-container">
-                    <div id="chessboard" style="width: 400px;"></div>
-                </div>
-                <div id="info-container">
-                    <div id="move-history">
-                        <h3>Move History</h3>
-                        <ol id="moves"></ol>
-                    </div>
-                    <div id="status">
-                        <h3>Game Status</h3>
-                        <p id="status-text">Game in progress...</p>
-                    </div>
-                </div>
-            </div>
-        </section>
+        <div id="board-container">
+            <div id="chessboard" style="width: 400px;"></div>
+        </div>
     </main>
     <footer>
         <p>&copy; 2024 Douchess. All rights reserved.</p>
     </footer>
+    <script type="module">
+      // Import the functions you need from the SDKs you need
+      import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-app.js";
+      import { getAnalytics } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-analytics.js";
+      // TODO: Add SDKs for Firebase products that you want to use
+      // https://firebase.google.com/docs/web/setup#available-libraries
+
+      // Your web app's Firebase configuration
+      // For Firebase JS SDK v7.20.0 and later, measurementId is optional
+      const firebaseConfig = {
+        apiKey: "AIzaSyC8ORguVAR-tG6QFawBrpUWxvy_FjcnDN0",
+        authDomain: "douchess2024.firebaseapp.com",
+        projectId: "douchess2024",
+        storageBucket: "douchess2024.appspot.com",
+        messagingSenderId: "849463658201",
+        appId: "1:849463658201:web:e2b9f22e0c25d56f49e0c8",
+        measurementId: "G-KSZ64T6XW6"
+      };
+
+      // Initialize Firebase
+      const app = initializeApp(firebaseConfig);
+      const analytics = getAnalytics(app);
+    </script>
     <script src="app.js"></script>
 </body>
 </html>
