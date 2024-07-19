@@ -14,8 +14,10 @@
         <h1>Welcome to Douchess</h1>
     </header>
     <main>
+        <!-- Chessboard Section -->
         <div id="board-container">
             <div id="chessboard" style="width: 400px;"></div>
+            <div id="status"></div>
         </div>
 
         <!-- Sign Up Form -->
@@ -33,6 +35,17 @@
             <input type="password" id="signin-password" placeholder="Password" required>
             <button type="submit">Sign In</button>
         </form>
+
+        <!-- Profile Section -->
+        <section id="profile-section" style="display: none;">
+            <h2>Profile</h2>
+            <p>Email: <span id="user-email"></span></p>
+            <form id="update-profile-form">
+                <input type="text" id="username" placeholder="Username">
+                <button type="submit">Update Profile</button>
+            </form>
+            <button id="signout-button">Sign Out</button>
+        </section>
     </main>
     <footer>
         <p>&copy; 2024 Douchess. All rights reserved.</p>
