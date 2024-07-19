@@ -1,6 +1,9 @@
 document.addEventListener('DOMContentLoaded', () => {
     const boardElement = document.getElementById('chessboard');
     const game = new Chess();
+    const statusElement = document.getElementById('status-text');
+    const movesElement = document.getElementById('moves');
+
     const board = Chessboard(boardElement, {
         draggable: true,
         position: 'start',
@@ -19,9 +22,12 @@ document.addEventListener('DOMContentLoaded', () => {
             if (move === null) {
                 return 'snapback';
             }
+
+            updateStatus();
+            updateMoveHistory(move);
         },
         onMouseoutSquare: () => {
-            boardEl.querySelectorAll('.square-55d63').forEach(square => {
+            boardElement.querySelectorAll('.square-55d63').forEach(square => {
                 square.style.backgroundColor = '';
             });
         },
@@ -41,4 +47,32 @@ document.addEventListener('DOMContentLoaded', () => {
             board.position(game.fen());
         }
     });
+
+    function updateStatus() {
+        let status = '';
+
+        const moveColor = game.turn() === 'b' ? 'Black' : 'White';
+
+        if (game.in_checkmate()) {
+            status = `Game over, ${moveColor} is in checkmate.`;
+        } else if (game.in_draw()) {
+            status = 'Game over, drawn position';
+        } else {
+            status = `${moveColor} to move`;
+
+            if (game.in_check()) {
+                status += `, ${moveColor} is in check`;
+            }
+        }
+
+        statusElement.textContent = status;
+    }
+
+    function updateMoveHistory(move) {
+        const moveElement = document.createElement('li');
+        moveElement.textContent = move.san;
+        movesElement.appendChild(moveElement);
+    }
+
+    updateStatus();
 });
