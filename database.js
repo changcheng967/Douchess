@@ -1,8 +1,12 @@
-const sqlite3 = require('sqlite3').verbose();
-const path = require('path');
-const fs = require('fs');
+import sqlite3 from 'sqlite3';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import fs from 'fs';
 
-// Use Render's persistent storage directory
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Use Render's persistent storage
 const dbDir = path.join(__dirname, 'persistent');
 const dbPath = path.join(dbDir, 'chess.db');
 
@@ -16,9 +20,7 @@ const db = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE | sqlite3.OPEN_CR
     console.error('Database connection error:', err);
   } else {
     console.log('Connected to SQLite database at:', dbPath);
-    // Enable WAL mode for better performance
     db.run('PRAGMA journal_mode=WAL;');
-    db.run('PRAGMA synchronous=NORMAL;');
   }
 });
 
@@ -58,4 +60,4 @@ db.serialize(() => {
   )`);
 });
 
-module.exports = db;
+export default db;
