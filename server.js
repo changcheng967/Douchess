@@ -3,6 +3,7 @@ import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import cors from 'cors';
+import { Server } from 'socket.io'; // Correct import
 import { User, Game } from './models.js';
 import setupSockets from './sockets.js';
 import fs from 'fs';
@@ -19,7 +20,9 @@ if (!fs.existsSync(dbDir)) {
 
 const app = express();
 const server = http.createServer(app);
-const io = new SocketIO.Server(server, {
+
+// Correct Socket.IO initialization
+const io = new Server(server, {
   cors: {
     origin: process.env.CLIENT_URL || "*",
     methods: ["GET", "POST"]
@@ -42,7 +45,54 @@ app.post('/create-game', async (req, res) => {
   }
 });
 
-// ... keep other routes the same ...
+app.get('/game/:shortCode', async (req, res) => {
+  try {
+    const game = await Game.getByCode(req.params.shortCode);
+    if (!game) {
+      return res.status(404).json({ error: 'Game not found' });
+    }
+    res.json(game);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/auth', async (req, res) => {
+  try {
+    const { username, password, isNew } = req.body;
+    
+    let user;
+    if (isNew) {
+      const existing = await User.findByName(username);
+      if (existing) {
+        return res.status(400).json({ error: 'Username already exists' });
+      }
+      const userId = await User.create(username, password);
+      user = { id: userId, username };
+    } else {
+      user = await User.findByName(username);
+      if (!user || !(await User.comparePassword(password, user.password))) {
+        return res.status(401).json({ error: 'Invalid credentials' });
+      }
+    }
+    
+    res.json({ user: { id: user.id, username: user.username } });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/stats/:username', async (req, res) => {
+  try {
+    const stats = await User.getStats(req.params.username);
+    if (!stats) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    res.json(stats);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // Initialize sockets
 setupSockets(io);
