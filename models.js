@@ -1,13 +1,11 @@
-const db = require('./database');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const Chess = require('chess.js').Chess;
-const shortid = require('shortid');
+import { Chess } from 'chess.js';
+import shortid from 'shortid';
+import db from './database.js';
 
 // User model
 const User = {
   async create(username, password = null) {
-    const hashedPassword = password ? await bcrypt.hash(password, 10) : null;
+    const hashedPassword = password ? await bcryptjs.hash(password, 10) : null;
     return new Promise((resolve, reject) => {
       db.run(
         'INSERT INTO users (username, password) VALUES (?, ?)',
@@ -64,7 +62,7 @@ const User = {
 
 // Game model
 const Game = {
-  create() {
+  async create() {
     const shortCode = shortid.generate();
     return new Promise((resolve, reject) => {
       db.run(
@@ -147,4 +145,4 @@ const Game = {
   }
 };
 
-module.exports = { User, Game };
+export { User, Game };
