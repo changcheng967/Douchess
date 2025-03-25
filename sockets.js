@@ -1,7 +1,7 @@
 import { Chess } from 'chess.js';
 import { User, Game } from './models.js';
 
-export default function setupSockets(io) {
+function setupSockets(io) {
   io.on('connection', (socket) => {
     console.log('New connection:', socket.id);
 
@@ -95,28 +95,28 @@ export default function setupSockets(io) {
       console.log('Disconnected:', socket.id);
     });
   });
-}
 
-async function authenticateUser(username, password, isNew) {
-  try {
-    let user;
-    if (isNew) {
-      const existing = await User.findByName(username);
-      if (existing) {
-        return { error: 'Username already exists' };
+  async function authenticateUser(username, password, isNew) {
+    try {
+      let user;
+      if (isNew) {
+        const existing = await User.findByName(username);
+        if (existing) {
+          return { error: 'Username already exists' };
+        }
+        const userId = await User.create(username, password);
+        user = { id: userId, username };
+      } else {
+        user = await User.findByName(username);
+        if (!user || !(await User.comparePassword(password, user.password))) {
+          return { error: 'Invalid credentials' };
+        }
       }
-      const userId = await User.create(username, password);
-      user = { id: userId, username };
-    } else {
-      user = await User.findByName(username);
-      if (!user || !(await User.comparePassword(password, user.password))) {
-        return { error: 'Invalid credentials' };
-      }
+      return { user };
+    } catch (error) {
+      return { error: error.message };
     }
-    return { user };
-  } catch (error) {
-    return { error: error.message };
   }
 }
 
-module.exports = setupSockets;
+export default setupSockets;
