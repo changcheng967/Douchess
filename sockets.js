@@ -1,7 +1,7 @@
-const { User, Game } = require('./models');
-const Chess = require('chess.js').Chess;
+import { Chess } from 'chess.js';
+import { User, Game } from './models.js';
 
-function setupSockets(io) {
+export default function setupSockets(io) {
   io.on('connection', (socket) => {
     console.log('New connection:', socket.id);
 
