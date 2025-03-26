@@ -1,21 +1,39 @@
-<h1>Welcome to Chess Platform</h1>
-<% if (user) { %>
-  <p>Hello, <%= user.username %>! Rating: <%= user.stats.rating %></p>
-  <div>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Chess Platform</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <% if (user) { %>
+    <h1>Welcome back, <%= user.username %>!</h1>
+    <p>Your rating: <%= user.stats.rating %></p>
     <a href="/game/create" class="btn">Create New Game</a>
-  </div>
-  
-  <h2>Active Games</h2>
-  <div class="games-list">
-    <% games.forEach(game => { %>
-      <div class="game-card">
-        <p>Game ID: <%= game.id %></p>
-        <p>White: <%= game.whitePlayer.username %></p>
-        <p>Black: <%= game.blackPlayer ? game.blackPlayer.username : 'Waiting...' %></p>
-        <a href="/game/<%= game.id %>" class="btn">Join Game</a>
+    
+    <h2>Available Games</h2>
+    <% if (games && games.length > 0) { %>
+      <div class="games-list">
+        <% games.forEach(game => { %>
+          <div class="game-card">
+            <p>Game #<%= game.id %></p>
+            <p>White: <%= game.whitePlayer.username %></p>
+            <% if (game.blackPlayer) { %>
+              <p>Black: <%= game.blackPlayer.username %></p>
+            <% } else { %>
+              <p>Black: Waiting for player...</p>
+            <% } %>
+            <a href="/game/<%= game.id %>" class="btn">Join Game</a>
+          </div>
+        <% }); %>
       </div>
-    <% }); %>
-  </div>
-<% } else { %>
-  <p>Please login or register to play chess.</p>
-<% } %>
+    <% } else { %>
+      <p>No active games found. Create one!</p>
+    <% } %>
+  <% } else { %>
+    <h1>Welcome to Chess Platform</h1>
+    <p>Please <a href="/auth/login">login</a> or <a href="/auth/register">register</a> to play chess.</p>
+  <% } %>
+</body>
+</html>
