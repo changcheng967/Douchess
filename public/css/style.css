@@ -1,0 +1,94 @@
+body {
+  font-family: Arial, sans-serif;
+  margin: 0;
+  padding: 0;
+  line-height: 1.6;
+}
+
+nav {
+  background: #333;
+  color: #fff;
+  padding: 1rem;
+}
+
+nav a {
+  color: #fff;
+  margin-right: 1rem;
+  text-decoration: none;
+}
+
+.btn {
+  display: inline-block;
+  background: #333;
+  color: #fff;
+  padding: 0.5rem 1rem;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.btn:hover {
+  background: #555;
+}
+
+.game-container {
+  display: flex;
+  gap: 2rem;
+  margin: 2rem;
+}
+
+.chess-board {
+  width: 500px;
+  height: 500px;
+  border: 1px solid #333;
+}
+
+.game-info {
+  flex: 1;
+}
+
+.chat-box {
+  margin-top: 1rem;
+  border: 1px solid #ddd;
+  padding: 1rem;
+}
+
+#messages {
+  height: 200px;
+  overflow-y: scroll;
+  border: 1px solid #eee;
+  margin-bottom: 1rem;
+  padding: 0.5rem;
+}
+
+.games-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.game-card {
+  border: 1px solid #ddd;
+  padding: 1rem;
+  border-radius: 4px;
+}
+
+.stats-container {
+  display: flex;
+  gap: 1rem;
+  margin: 1rem 0;
+}
+
+.stat-card {
+  border: 1px solid #ddd;
+  padding: 1rem;
+  text-align: center;
+  flex: 1;
+}
+
+.error {
+  color: red;
+  margin: 1rem 0;
+}
