@@ -1,3 +1,103 @@
+<<<<<<< HEAD
+const { Sequelize, DataTypes, Op } = require('sequelize');
+const sequelize = require('./db');
+const bcrypt = require('bcryptjs');
+
+const User = sequelize.define('User', {
+  username: {
+    type: DataTypes.STRING,
+    allowNull: false,
+    unique: true
+  },
+  password: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  stats: {
+    type: DataTypes.JSON,
+    defaultValue: {
+      wins: 0,
+      losses: 0,
+      draws: 0,
+      rating: 1000
+    }
+  }
+}, {
+  hooks: {
+    beforeSave: async (user) => {
+      if (user.changed('password')) {
+        user.password = await bcrypt.hash(user.password, 10);
+      }
+    }
+  }
+});
+
+const Game = sequelize.define('Game', {
+  fen: {
+    type: DataTypes.STRING,
+    defaultValue: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+  },
+  pgn: {
+    type: DataTypes.TEXT,
+    defaultValue: ''
+  },
+  moves: {
+    type: DataTypes.JSON,
+    defaultValue: []
+  },
+  status: {
+    type: DataTypes.ENUM('waiting', 'active', 'completed'),
+    defaultValue: 'waiting'
+  },
+  result: {
+    type: DataTypes.ENUM('white', 'black', 'draw'),
+    allowNull: true
+  }
+});
+
+// Model Methods
+User.incrementStats = async function(userId, type) {
+  const user = await User.findByPk(userId);
+  if (!user) return;
+
+  const stats = user.stats || { wins: 0, losses: 0, draws: 0, rating: 1000 };
+  
+  switch (type) {
+    case 'win':
+      stats.wins += 1;
+      stats.rating += 10;
+      break;
+    case 'loss':
+      stats.losses += 1;
+      stats.rating = Math.max(0, stats.rating - 10);
+      break;
+    case 'draw':
+      stats.draws += 1;
+      stats.rating += 5;
+      break;
+  }
+
+  await user.update({ stats });
+};
+
+// Associations
+User.hasMany(Game, { as: 'whiteGames', foreignKey: 'whitePlayerId' });
+User.hasMany(Game, { as: 'blackGames', foreignKey: 'blackPlayerId' });
+Game.belongsTo(User, { as: 'whitePlayer', foreignKey: 'whitePlayerId' });
+Game.belongsTo(User, { as: 'blackPlayer', foreignKey: 'blackPlayerId' });
+
+const initDb = async () => {
+  try {
+    await sequelize.authenticate();
+    await sequelize.sync({ force: false });
+    console.log('Database synchronized');
+  } catch (error) {
+    console.error('Database error:', error);
+  }
+};
+
+module.exports = { User, Game, initDb, Op };
+=======
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
@@ -44,13 +144,12 @@ const userSchema = new mongoose.Schema({
 }, {
   toJSON: {
     transform: function(doc, ret) {
-      delete ret.password; // Never return password in queries
+      delete ret.password;
       return ret;
     }
   }
 });
 
-// Password hashing middleware
 userSchema.pre('save', async function(next) {
   if (!this.isModified('password')) return next();
   
@@ -63,12 +162,10 @@ userSchema.pre('save', async function(next) {
   }
 });
 
-// Method to compare passwords
 userSchema.methods.comparePassword = async function(candidatePassword) {
   return await bcrypt.compare(candidatePassword, this.password);
 };
 
-// Stats management methods
 userSchema.methods.addWin = async function() {
   this.stats.wins += 1;
   this.stats.rating += 10;
@@ -129,14 +226,12 @@ const gameSchema = new mongoose.Schema({
   toObject: { virtuals: true }
 });
 
-// Virtual population for game history
 gameSchema.virtual('players', {
   ref: 'User',
   localField: '_id',
   foreignField: 'games'
 });
 
-// Update game status when result is set
 gameSchema.pre('save', function(next) {
   if (this.isModified('result') && this.result) {
     this.status = 'completed';
@@ -149,3 +244,4 @@ const User = mongoose.model('User', userSchema);
 const Game = mongoose.model('Game', gameSchema);
 
 module.exports = { User, Game };
+>>>>>>> Douchess-Init-0326
