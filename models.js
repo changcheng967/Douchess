@@ -1,8 +1,7 @@
-const { Sequelize, DataTypes } = require('sequelize');
+const { Sequelize, DataTypes, Op } = require('sequelize');
 const sequelize = require('./db');
 const bcrypt = require('bcryptjs');
 
-// User Model
 const User = sequelize.define('User', {
   username: {
     type: DataTypes.STRING,
@@ -22,9 +21,16 @@ const User = sequelize.define('User', {
       rating: 1000
     }
   }
+}, {
+  hooks: {
+    beforeSave: async (user) => {
+      if (user.changed('password')) {
+        user.password = await bcrypt.hash(user.password, 10);
+      }
+    }
+  }
 });
 
-// Game Model
 const Game = sequelize.define('Game', {
   fen: {
     type: DataTypes.STRING,
@@ -48,24 +54,45 @@ const Game = sequelize.define('Game', {
   }
 });
 
+// Model Methods
+User.incrementStats = async function(userId, type) {
+  const user = await User.findByPk(userId);
+  if (!user) return;
+
+  const stats = user.stats || { wins: 0, losses: 0, draws: 0, rating: 1000 };
+  
+  switch (type) {
+    case 'win':
+      stats.wins += 1;
+      stats.rating += 10;
+      break;
+    case 'loss':
+      stats.losses += 1;
+      stats.rating = Math.max(0, stats.rating - 10);
+      break;
+    case 'draw':
+      stats.draws += 1;
+      stats.rating += 5;
+      break;
+  }
+
+  await user.update({ stats });
+};
+
 // Associations
 User.hasMany(Game, { as: 'whiteGames', foreignKey: 'whitePlayerId' });
 User.hasMany(Game, { as: 'blackGames', foreignKey: 'blackPlayerId' });
 Game.belongsTo(User, { as: 'whitePlayer', foreignKey: 'whitePlayerId' });
 Game.belongsTo(User, { as: 'blackPlayer', foreignKey: 'blackPlayerId' });
 
-// Initialize database
 const initDb = async () => {
   try {
     await sequelize.authenticate();
-    console.log('Connection to SQLite has been established successfully.');
-    
-    // Sync all models
-    await sequelize.sync({ force: false }); // Set force: true to reset database
-    console.log('All models were synchronized successfully.');
+    await sequelize.sync({ force: false });
+    console.log('Database connected and synced');
   } catch (error) {
-    console.error('Unable to connect to the database:', error);
+    console.error('Database error:', error);
   }
 };
 
-module.exports = { User, Game, initDb };
+module.exports = { User, Game, initDb, Op };
