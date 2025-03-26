@@ -1,0 +1,31 @@
+<div class="game-container">
+  <div class="chess-board" id="board"></div>
+  <div class="game-info">
+    <h3>Game ID: <%= game.id %></h3>
+    <p>White: <%= game.whitePlayer.username %> (<%= game.whitePlayer.stats.rating %>)</p>
+    <p>Black: <%= game.blackPlayer ? game.blackPlayer.username : 'Waiting...' %></p>
+    <p>Status: <%= game.status %></p>
+    
+    <div class="moves-list">
+      <% game.moves.forEach((move, i) => { %>
+        <span><%= i+1 %>. <%= move %></span>
+      <% }); %>
+    </div>
+    
+    <div class="chat-box">
+      <div id="messages"></div>
+      <input type="text" id="messageInput" placeholder="Type your message...">
+      <button id="sendMessage">Send</button>
+    </div>
+  </div>
+</div>
+
+<script src="/js/chessboard.js"></script>
+<script src="/js/game.js"></script>
+<script>
+  const gameId = '<%= game.id %>';
+  const username = '<%= user.username %>';
+  const isWhite = '<%= game.whitePlayerId === user.id %>' === 'true';
+  
+  initGame(gameId, username, isWhite);
+</script>
