@@ -1,0 +1,30 @@
+<h1><%= profile.username %>'s Stats</h1>
+<div class="stats-container">
+  <div class="stat-card">
+    <h3>Wins</h3>
+    <p><%= profile.stats.wins %></p>
+  </div>
+  <div class="stat-card">
+    <h3>Losses</h3>
+    <p><%= profile.stats.losses %></p>
+  </div>
+  <div class="stat-card">
+    <h3>Draws</h3>
+    <p><%= profile.stats.draws %></p>
+  </div>
+  <div class="stat-card">
+    <h3>Rating</h3>
+    <p><%= profile.stats.rating %></p>
+  </div>
+</div>
+
+<h2>Recent Games</h2>
+<div class="games-list">
+  <% games.forEach(game => { %>
+    <div class="game-card">
+      <p><%= game.whitePlayer.username %> vs <%= game.blackPlayer.username %></p>
+      <p>Result: <%= game.result || 'In progress' %></p>
+      <p>Date: <%= game.updatedAt.toLocaleDateString() %></p>
+    </div>
+  <% }); %>
+</div>

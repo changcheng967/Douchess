@@ -1,122 +1,81 @@
-import { Chess } from 'chess.js';
-import { User, Game } from './models.js';
+const { Chess } = require('chess.js');
+const { User, Game } = require('./models');
 
-function setupSockets(io) {
+module.exports = function(io) {
   io.on('connection', (socket) => {
-    console.log('New connection:', socket.id);
-
-    let currentGame = null;
-    let currentUser = null;
-
-    socket.on('joinGame', async ({ shortCode, username, password, isNew }, callback) => {
-      try {
-        // Authenticate
-        let authResponse;
-        if (username) {
-          authResponse = await authenticateUser(username, password, isNew);
-          if (authResponse.error) {
-            return callback({ error: authResponse.error });
-          }
-          currentUser = authResponse.user;
-        } else {
-          currentUser = { username: 'Anonymous' };
-        }
-
-        // Find game
-        const game = await Game.getByCode(shortCode);
-        if (!game) {
-          return callback({ error: 'Game not found' });
-        }
-
-        // Determine color
-        let color;
-        if (!game.white_id && !game.black_id) {
-          color = Math.random() > 0.5 ? 'white' : 'black';
-        } else if (!game.white_id) {
-          color = 'white';
-        } else if (!game.black_id) {
-          color = 'black';
-        } else {
-          return callback({ error: 'Game is full' });
-        }
-
-        // Join game
-        await Game.join(game.id, currentUser.id, currentUser.username, color);
-        currentGame = await Game.get(game.id);
-
-        socket.join(`game_${game.id}`);
-        callback({ 
-          success: true, 
-          game: currentGame,
-          color,
-          user: currentUser
-        });
-
-        io.to(`game_${game.id}`).emit('gameUpdate', currentGame);
-      } catch (error) {
-        console.error('Join game error:', error);
-        callback({ error: error.message });
+    console.log('New client connected');
+    
+    // Join game room
+    socket.on('joinGame', async (gameId) => {
+      socket.join(gameId);
+      
+      const game = await Game.findByPk(gameId, {
+        include: [
+          { model: User, as: 'whitePlayer' },
+          { model: User, as: 'blackPlayer' }
+        ]
+      });
+      
+      if (game) {
+        socket.emit('gameState', game);
       }
     });
-
-    socket.on('makeMove', async ({ move }) => {
-      if (!currentGame) return;
-
+    
+    // Handle moves
+    socket.on('move', async ({ gameId, move }) => {
       try {
-        const chess = new Chess(currentGame.fen);
-        chess.move(move);
-
-        const status = await Game.makeMove(currentGame.id, chess.fen(), chess.pgn());
-        const updatedGame = await Game.get(currentGame.id);
-        currentGame = updatedGame;
-
-        io.to(`game_${currentGame.id}`).emit('gameUpdate', updatedGame);
-
-        if (status !== 'active') {
-          const winner = status === 'white_win' ? updatedGame.white_id : 
-                         status === 'black_win' ? updatedGame.black_id : null;
+        const gameDoc = await Game.findByPk(gameId);
+        if (!gameDoc) return;
+        
+        const game = new Chess(gameDoc.fen);
+        const result = game.move(move);
+        
+        if (result) {
+          gameDoc.fen = game.fen();
+          gameDoc.pgn = game.pgn();
+          gameDoc.moves = [...gameDoc.moves, move];
           
-          if (currentUser.id) {
-            if (winner === currentUser.id) {
-              await User.updateStats(currentUser.id, 'win');
-            } else if (winner !== null) {
-              await User.updateStats(currentUser.id, 'loss');
-            } else {
-              await User.updateStats(currentUser.id, 'draw');
+          // Check for game over
+          if (game.isGameOver()) {
+            gameDoc.status = 'completed';
+            
+            if (game.isCheckmate()) {
+              gameDoc.result = game.turn() === 'w' ? 'black' : 'white';
+              
+              // Update user stats
+              const winnerId = gameDoc.result === 'white' ? 
+                gameDoc.whitePlayerId : gameDoc.blackPlayerId;
+              const loserId = gameDoc.result === 'white' ? 
+                gameDoc.blackPlayerId : gameDoc.whitePlayerId;
+              
+              await User.updateStats(winnerId, 'win');
+              await User.updateStats(loserId, 'loss');
+            } else if (game.isDraw()) {
+              gameDoc.result = 'draw';
+              await User.updateStats(gameDoc.whitePlayerId, 'draw');
+              await User.updateStats(gameDoc.blackPlayerId, 'draw');
             }
           }
+          
+          await gameDoc.save();
+          io.to(gameId).emit('gameState', gameDoc);
         }
-      } catch (error) {
-        socket.emit('moveError', error.message);
+      } catch (err) {
+        console.error(err);
       }
     });
-
+    
+    // Handle chat messages
+    socket.on('chatMessage', ({ gameId, message, username }) => {
+      io.to(gameId).emit('message', { 
+        username, 
+        message, 
+        timestamp: new Date() 
+      });
+    });
+    
     socket.on('disconnect', () => {
-      console.log('Disconnected:', socket.id);
+      console.log('Client disconnected');
     });
   });
-
-  async function authenticateUser(username, password, isNew) {
-    try {
-      let user;
-      if (isNew) {
-        const existing = await User.findByName(username);
-        if (existing) {
-          return { error: 'Username already exists' };
-        }
-        const userId = await User.create(username, password);
-        user = { id: userId, username };
-      } else {
-        user = await User.findByName(username);
-        if (!user || !(await User.comparePassword(password, user.password))) {
-          return { error: 'Invalid credentials' };
-        }
-      }
-      return { user };
-    } catch (error) {
-      return { error: error.message };
-    }
-  }
-}
-
-export default setupSockets;
+};

@@ -1,148 +1,71 @@
-import { Chess } from 'chess.js';
-import shortid from 'shortid';
-import db from './database.js';
+const { Sequelize, DataTypes } = require('sequelize');
+const sequelize = require('./db');
+const bcrypt = require('bcryptjs');
 
-// User model
-const User = {
-  async create(username, password = null) {
-    const hashedPassword = password ? await bcryptjs.hash(password, 10) : null;
-    return new Promise((resolve, reject) => {
-      db.run(
-        'INSERT INTO users (username, password) VALUES (?, ?)',
-        [username, hashedPassword],
-        function(err) {
-          if (err) return reject(err);
-          resolve(this.lastID);
-        }
-      );
-    });
+// User Model
+const User = sequelize.define('User', {
+  username: {
+    type: DataTypes.STRING,
+    allowNull: false,
+    unique: true
   },
-
-  async findByName(username) {
-    return new Promise((resolve, reject) => {
-      db.get('SELECT * FROM users WHERE username = ?', [username], (err, row) => {
-        if (err) return reject(err);
-        resolve(row);
-      });
-    });
+  password: {
+    type: DataTypes.STRING,
+    allowNull: false
   },
+  stats: {
+    type: DataTypes.JSON,
+    defaultValue: {
+      wins: 0,
+      losses: 0,
+      draws: 0,
+      rating: 1000
+    }
+  }
+});
 
-  async comparePassword(password, hashedPassword) {
-    if (!hashedPassword) return false;
-    return await bcrypt.compare(password, hashedPassword);
+// Game Model
+const Game = sequelize.define('Game', {
+  fen: {
+    type: DataTypes.STRING,
+    defaultValue: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
   },
-
-  async updateStats(userId, result) {
-    const field = result === 'win' ? 'wins' : result === 'loss' ? 'losses' : 'draws';
-    return new Promise((resolve, reject) => {
-      db.run(
-        `UPDATE users SET ${field} = ${field} + 1 WHERE id = ?`,
-        [userId],
-        function(err) {
-          if (err) return reject(err);
-          resolve(this.changes);
-        }
-      );
-    });
+  pgn: {
+    type: DataTypes.TEXT,
+    defaultValue: ''
   },
+  moves: {
+    type: DataTypes.JSON,
+    defaultValue: []
+  },
+  status: {
+    type: DataTypes.ENUM('waiting', 'active', 'completed'),
+    defaultValue: 'waiting'
+  },
+  result: {
+    type: DataTypes.ENUM('white', 'black', 'draw'),
+    allowNull: true
+  }
+});
 
-  async getStats(username) {
-    return new Promise((resolve, reject) => {
-      db.get(
-        'SELECT username, wins, losses, draws, elo FROM users WHERE username = ?',
-        [username],
-        (err, row) => {
-          if (err) return reject(err);
-          resolve(row);
-        }
-      );
-    });
+// Associations
+User.hasMany(Game, { as: 'whiteGames', foreignKey: 'whitePlayerId' });
+User.hasMany(Game, { as: 'blackGames', foreignKey: 'blackPlayerId' });
+Game.belongsTo(User, { as: 'whitePlayer', foreignKey: 'whitePlayerId' });
+Game.belongsTo(User, { as: 'blackPlayer', foreignKey: 'blackPlayerId' });
+
+// Initialize database
+const initDb = async () => {
+  try {
+    await sequelize.authenticate();
+    console.log('Connection to SQLite has been established successfully.');
+    
+    // Sync all models
+    await sequelize.sync({ force: false }); // Set force: true to reset database
+    console.log('All models were synchronized successfully.');
+  } catch (error) {
+    console.error('Unable to connect to the database:', error);
   }
 };
 
-// Game model
-const Game = {
-  async create() {
-    const shortCode = shortid.generate();
-    return new Promise((resolve, reject) => {
-      db.run(
-        'INSERT INTO games (short_code) VALUES (?)',
-        [shortCode],
-        function(err) {
-          if (err) return reject(err);
-          resolve({ id: this.lastID, shortCode });
-        }
-      );
-    });
-  },
-
-  join(gameId, playerId, username, color) {
-    const column = color === 'white' ? 'white_id' : 'black_id';
-    const nameColumn = color === 'white' ? 'white_name' : 'black_name';
-    return new Promise((resolve, reject) => {
-      db.run(
-        `UPDATE games SET ${column} = ?, ${nameColumn} = ?, status = ? WHERE id = ?`,
-        [playerId, username, 'active', gameId],
-        function(err) {
-          if (err) return reject(err);
-          resolve(this.changes);
-        }
-      );
-    });
-  },
-
-  makeMove(gameId, fen, pgn) {
-    return new Promise((resolve, reject) => {
-      const chess = new Chess(fen);
-      const status = chess.isGameOver() 
-        ? chess.isCheckmate() 
-          ? chess.turn() === 'w' ? 'black_win' : 'white_win'
-          : 'draw'
-        : 'active';
-
-      db.run(
-        'UPDATE games SET fen = ?, pgn = ?, status = ? WHERE id = ?',
-        [fen, pgn, status, gameId],
-        function(err) {
-          if (err) return reject(err);
-          resolve(status);
-        }
-      );
-    });
-  },
-
-  getByCode(shortCode) {
-    return new Promise((resolve, reject) => {
-      db.get('SELECT * FROM games WHERE short_code = ?', [shortCode], (err, row) => {
-        if (err) return reject(err);
-        resolve(row);
-      });
-    });
-  },
-
-  get(gameId) {
-    return new Promise((resolve, reject) => {
-      db.get('SELECT * FROM games WHERE id = ?', [gameId], (err, row) => {
-        if (err) return reject(err);
-        resolve(row);
-      });
-    });
-  },
-
-  listAvailable() {
-    return new Promise((resolve, reject) => {
-      db.all(`
-        SELECT g.id, g.short_code, g.created_at, u.username as white_username
-        FROM games g
-        JOIN users u ON g.white_id = u.id
-        WHERE g.black_id IS NULL
-        ORDER BY g.created_at DESC
-      `, (err, rows) => {
-        if (err) return reject(err);
-        resolve(rows);
-      });
-    });
-  }
-};
-
-export { User, Game };
+module.exports = { User, Game, initDb };
