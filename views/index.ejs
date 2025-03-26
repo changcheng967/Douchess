@@ -1,0 +1,21 @@
+<h1>Welcome to Chess Platform</h1>
+<% if (user) { %>
+  <p>Hello, <%= user.username %>! Rating: <%= user.stats.rating %></p>
+  <div>
+    <a href="/game/create" class="btn">Create New Game</a>
+  </div>
+  
+  <h2>Active Games</h2>
+  <div class="games-list">
+    <% games.forEach(game => { %>
+      <div class="game-card">
+        <p>Game ID: <%= game.id %></p>
+        <p>White: <%= game.whitePlayer.username %></p>
+        <p>Black: <%= game.blackPlayer ? game.blackPlayer.username : 'Waiting...' %></p>
+        <a href="/game/<%= game.id %>" class="btn">Join Game</a>
+      </div>
+    <% }); %>
+  </div>
+<% } else { %>
+  <p>Please login or register to play chess.</p>
+<% } %>
