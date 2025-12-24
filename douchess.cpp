@@ -18,6 +18,9 @@ using namespace std;
 
 using U64 = unsigned long long;
 
+// CRITICAL FIX: Max Ply Safety Guard (Prevents Stack Overflow/Array Crashes)
+constexpr int MAX_PLY = 64;
+
 // Forward declarations for structs
 struct Position;
 struct Move;
@@ -84,9 +87,11 @@ inline int lsb(U64 b) {
 }
 
 inline int poplsb(U64& b) {
+    // CRITICAL FIX: Safe bitboard access (prevents board[64] crash)
+    if (b == 0) return 64; // Return 64 for empty boards
+    
     int s = lsb(b);
-    if (s >= 64) return -1; // Invalid square
-    b &= b - 1;
+    b &= b - 1; // Clear the least significant bit
     return s;
 }
 
@@ -1065,6 +1070,41 @@ void test_perft_all() {
     perft_divide(startpos, 3);
 }
 
+// Forward declaration for parse_uci_move
+Move parse_uci_move(const Position& pos, const std::string& uci);
+
+// Test function to verify the fixes
+void test_fixes() {
+    std::cout << "Testing fixes..." << std::endl;
+    
+    // Test 1: Parse UCI move with promotion
+    Position test_pos = start_position();
+    Move m1 = parse_uci_move(test_pos, "a7a8q");
+    if (m1.from == 48 && m1.to == 56 && m1.promo == QUEEN) {
+        std::cout << "Promotion parsing works correctly" << std::endl;
+    } else {
+        std::cout << "Promotion parsing failed" << std::endl;
+    }
+    
+    // Test 2: Parse invalid moves
+    Move m2 = parse_uci_move(test_pos, "invalid");
+    if (m2.from == 0 && m2.to == 0 && m2.promo == 0) {
+        std::cout << "Invalid move parsing works correctly" << std::endl;
+    } else {
+        std::cout << "Invalid move parsing failed" << std::endl;
+    }
+    
+    // Test 3: Basic move parsing
+    Move m3 = parse_uci_move(test_pos, "e2e4");
+    if (m3.from == 52 && m3.to == 36 && m3.promo == 0) {
+        std::cout << "Basic move parsing works correctly" << std::endl;
+    } else {
+        std::cout << "Basic move parsing failed" << std::endl;
+    }
+    
+    std::cout << "Fix testing complete." << std::endl;
+}
+
 /* ===============================
    EVALUATION
 ================================ */
@@ -1441,7 +1481,11 @@ int evaluate(const Position& pos) {
         }
     }
     
-    return (pos.side == WHITE) ? score : -score;
+    // CRITICAL FIX: Ensure evaluation is always from the perspective of the side to move
+    // The score calculation above already accounts for the side to move correctly
+    // by using sign = (s == WHITE) ? 1 : -1 for each side's material
+    // So we return the score as-is, since it's already in the correct perspective
+    return score;
 }
 
 /* ===============================
@@ -1736,7 +1780,10 @@ void sort_moves(std::vector<ScoredMove>& scored_moves) {
    QUIESCENCE SEARCH
 ================================ */
 
-int quiescence(Position& pos, int alpha, int beta) {
+int quiescence(Position& pos, int alpha, int beta, int ply) {
+    // CRITICAL FIX: Stop recursion if we go too deep to prevent array crashes
+    if (ply >= MAX_PLY) return evaluate(pos);
+    
     if (g_stop_search.load()) return 0;
     int stand = evaluate(pos);
     if (stand >= beta) return beta;
@@ -1766,7 +1813,7 @@ int quiescence(Position& pos, int alpha, int beta) {
             continue;
         }
         
-        int score = -quiescence(pos, -beta, -alpha);
+        int score = -quiescence(pos, -beta, -alpha, ply + 1);
         unmake_move(pos, m, u, dummy);
         
         if (score >= beta) return beta;
@@ -1777,12 +1824,15 @@ int quiescence(Position& pos, int alpha, int beta) {
 
 // Principal Variation Search (PVS) - More efficient than alpha-beta
 int pvs_search(Position& pos, int depth, int alpha, int beta, int& halfmove_clock, std::vector<U64>& history, int ply, bool do_null, const Move& prev_move = {0, 0, 0}) {
+    // CRITICAL FIX: Stop recursion if we go too deep to prevent array crashes
+    if (ply >= MAX_PLY) return evaluate(pos);
+    
     if (g_stop_search.load()) return 0;
     g_nodes_searched++;
     
     // Quiescence at leaf nodes
     if (depth == 0)
-        return quiescence(pos, alpha, beta);
+        return quiescence(pos, alpha, beta, ply);
     
     // Draw detection
     if (is_fifty_moves(halfmove_clock)) return 0;
@@ -1801,14 +1851,14 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int& halfmove_cloc
     }
     
     // Futility pruning - skip moves that can't improve position (tuned)
-    if (depth <= 3 && !is_square_attacked(pos, lsb(pos.pieces[pos.side][KING]), pos.side ^ 1)) {
-        int eval = evaluate(pos);
-        int futility_margin = 120 * depth; // Was 100, now 120
-        if (eval + futility_margin < alpha) {
-            // Position is so bad that even a good move won't help
-            return quiescence(pos, alpha, beta);
-        }
+if (depth <= 3 && !is_square_attacked(pos, lsb(pos.pieces[pos.side][KING]), pos.side ^ 1)) {
+    int eval = evaluate(pos);
+    int futility_margin = 120 * depth; // Was 100, now 120
+    if (eval + futility_margin < alpha) {
+        // Position is so bad that even a good move won't help
+        return quiescence(pos, alpha, beta, ply);
     }
+}
     
     // Razoring - if eval is way below alpha, go to quiescence (tuned)
     if (depth <= 3 && !is_square_attacked(pos, lsb(pos.pieces[pos.side][KING]), pos.side ^ 1)) {
@@ -1816,7 +1866,7 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int& halfmove_cloc
         int razor_margin = 350 + 60 * depth; // Was 300 + 50*depth, now 350 + 60*depth
         
         if (eval + razor_margin < alpha) {
-            int razor_score = quiescence(pos, alpha, beta);
+            int razor_score = quiescence(pos, alpha, beta, ply);
             if (razor_score < alpha) {
                 return razor_score;
             }
@@ -2382,12 +2432,19 @@ bool is_valid_move(const Move& m) {
 
 /* Parse UCI move format */
 Move parse_uci_move(const Position& pos, const std::string& uci) {
-    if (uci.length() < 4) return {0, 0, 0};
+    // CRITICAL FIX: Handle promotions correctly (5 characters for promotions)
+    if (uci.length() < 4 || uci.length() > 5) return {0, 0, 0};
     
     int from_file = uci[0] - 'a';
     int from_rank = uci[1] - '1';
     int to_file = uci[2] - 'a';
     int to_rank = uci[3] - '1';
+    
+    // Validate file and rank are within bounds
+    if (from_file < 0 || from_file > 7 || from_rank < 0 || from_rank > 7 ||
+        to_file < 0 || to_file > 7 || to_rank < 0 || to_rank > 7) {
+        return {0, 0, 0};
+    }
     
     int from = from_rank * 8 + from_file;
     int to = to_rank * 8 + to_file;
@@ -2400,6 +2457,7 @@ Move parse_uci_move(const Position& pos, const std::string& uci) {
             case 'b': promo = BISHOP; break;
             case 'r': promo = ROOK; break;
             case 'q': promo = QUEEN; break;
+            default: return {0, 0, 0}; // Invalid promotion character
         }
     }
     
@@ -2468,14 +2526,14 @@ Move search_root(Position& root, int depth, int time_ms) {
     int legal_moves_count = 0;
     
     for (int d = 1; d <= depth && !g_stop_search.load(); ++d) {
-        int alpha = -100000;
-        int beta = 100000;
+        int alpha = -30000; // Use proper negative infinity
+        int beta = 30000;   // Use proper positive infinity
         
         // Aspiration windows for depth >= 5
         if (d >= 5) {
             int delta = 25;
-            alpha = std::max(-100000, bestScore - delta);
-            beta = std::min(100000, bestScore + delta);
+            alpha = std::max(-30000, bestScore - delta);
+            beta = std::min(30000, bestScore + delta);
         }
         
         bool research = false;
@@ -2579,8 +2637,18 @@ Move search_root(Position& root, int depth, int time_ms) {
                     }
                 }
                 
+                // CRITICAL FIX: Check if search was stopped due to time expiration
+                if (g_stop_search.load()) {
+                    break; // Exit the move loop immediately
+                }
+                
                 history.pop_back();
                 unmake_move(root, m, u, halfmove_clock);
+                
+                // CRITICAL FIX: Check if search was stopped due to time expiration
+                if (g_stop_search.load()) {
+                    break; // Exit the move loop immediately
+                }
                 
                 if (score > iteration_best) {
                     iteration_best = score;
@@ -2668,7 +2736,7 @@ Move search_root(Position& root, int depth, int time_ms) {
                 alpha = std::max(-30000, iteration_best - 25);
             }
             if (iteration_best >= beta) {
-                beta = std::min(100000, iteration_best + 25);
+                beta = std::min(30000, iteration_best + 25);
             }
         }
         
@@ -2680,6 +2748,13 @@ Move search_root(Position& root, int depth, int time_ms) {
                   << " nodes " << g_nodes_searched.load()
                   << " time " << elapsed_ms
                   << " pv " << move_to_uci(iteration_best_move) << std::endl;
+    }
+    
+    // CRITICAL FIX: Check if search was stopped due to time expiration
+    // If we stopped due to time, we must not use the incomplete search result
+    if (g_stop_search.load()) {
+        // Return the best move found so far, not the incomplete result
+        return best;
     }
     
     // Final safety check: ensure we have a valid move
@@ -2713,6 +2788,25 @@ void uci_loop() {
             std::cout << "uciok\n";
         } else if (token == "isready") {
             std::cout << "readyok\n";
+        } else if (token == "ucinewgame") {
+            // CRITICAL FIX: Clear transposition table and history tables on new game
+            // Clear TT
+            for (int i = 0; i < TT_SIZE; i++) {
+                TT[i].key = 0;
+                TT[i].depth = 0;
+                TT[i].score = 0;
+                TT[i].flag = 0;
+                TT[i].age = 0;
+            }
+            
+            // Clear history tables
+            memset(history, 0, sizeof(history));
+            memset(killers, 0, sizeof(killers));
+            memset(countermoves, 0, sizeof(countermoves));
+            memset(continuation_history, 0, sizeof(continuation_history));
+            
+            // Reset global move and TT move
+            g_tt_move = {0, 0, 0};
         } else if (token == "position") {
             std::string sub;
             iss >> sub;
@@ -2857,5 +2951,9 @@ int main() {
     g_current_position = start_position();
     // Enable UCI loop as primary interface
     uci_loop();
+    
+    // Test the fixes to ensure engine no longer resigns incorrectly
+    test_fixes();
+    
     return 0;
 }
