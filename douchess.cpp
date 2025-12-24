@@ -2741,22 +2741,16 @@ Move search_root(Position& root, int depth, int time_ms) {
         }
     }
     
-    // CRITICAL FIX: Check if search was stopped due to time expiration
-    // If we stopped due to time, we must not use the incomplete search result
-    if (g_stop_search.load()) {
-        // Return the best move found so far, not the incomplete result
-        return best;
-    }
-    
     // Final safety check: ensure we have a valid move
+    // If best is still empty (shouldn't happen due to legal_moves_vec), force a random legal move
     if (best.from == 0 && best.to == 0 && best.promo == 0) {
-        // If still no valid move found, try to return the first legal move
         if (!legal_moves_vec.empty()) {
             best = legal_moves_vec[0];
         }
     }
 
-    // Output the required UCI bestmove so GUI receives the result
+    // CRITICAL FIX: We must print 'bestmove' BEFORE returning, even if we stopped early!
+    // Previously, the 'if (g_stop_search)' block returned early, skipping this print.
     std::cout << "bestmove " << move_to_uci(best) << std::endl;
     std::cout.flush();
 
