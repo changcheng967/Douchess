@@ -1853,7 +1853,7 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int& halfmove_cloc
         generate_moves(pos, singular_moves);
         
         // Search all moves except TT move with reduced depth
-        int non_tt_best = -100000;
+        int non_tt_best = -30000; // Use proper negative infinity
         for (const auto& m : singular_moves) {
             // Skip TT move
             if (m.from == g_tt_move.from && m.to == g_tt_move.to && m.promo == g_tt_move.promo)
@@ -1999,7 +1999,7 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int& halfmove_cloc
     sort_moves(scored_moves);
     
     int legal_moves = 0;
-    int best = -100000;
+    int best = -30000; // Use proper negative infinity for chess
     int orig_alpha = alpha;
     Move best_move = {0, 0, 0};
     
@@ -2414,22 +2414,14 @@ Move search_root(Position& root, int depth, int time_ms) {
     using namespace std::chrono;
     auto start = high_resolution_clock::now();
     
-    std::cerr << "DEBUG: search_root called, depth=" << depth << " time_ms=" << time_ms << std::endl;
-    std::cerr << "DEBUG: Position side=" << root.side << std::endl;
-    std::cerr << "DEBUG: White king=" << std::hex << root.pieces[WHITE][KING] << std::dec << std::endl;
-    std::cerr << "DEBUG: Black king=" << std::hex << root.pieces[BLACK][KING] << std::dec << std::endl;
-    
     Move best = {0, 0, 0};
-    int bestScore = -100000;
+    int bestScore = -30000; // Use proper negative infinity for chess
     
-    std::cerr << "DEBUG: About to generate moves..." << std::endl;
     std::vector<Move> moves;
     generate_moves(root, moves);
-    std::cerr << "DEBUG: Generated " << moves.size() << " moves" << std::endl;
     
     // If no moves available, return null move (shouldn't happen in normal chess)
     if (moves.empty()) {
-        std::cerr << "DEBUG: No moves available, returning null move" << std::endl;
         return best;
     }
     
@@ -2449,13 +2441,11 @@ Move search_root(Position& root, int depth, int time_ms) {
     
     if (legal_moves_vec.empty()) {
         // We are actually checkmated or stalemated
-        std::cerr << "DEBUG: No legal moves found (checkmate/stalemate)" << std::endl;
         return {0, 0, 0};
     }
     
     // Set a guaranteed legal move as the initial best
     best = legal_moves_vec[0];
-    std::cerr << "DEBUG: Set initial best move to: " << move_to_uci(best) << std::endl;
     
     int halfmove_clock = 0;
     std::vector<U64> history = { hash_position(root) };
@@ -2478,8 +2468,6 @@ Move search_root(Position& root, int depth, int time_ms) {
     int legal_moves_count = 0;
     
     for (int d = 1; d <= depth && !g_stop_search.load(); ++d) {
-        std::cerr << "DEBUG: Starting depth " << d << std::endl;
-        
         int alpha = -100000;
         int beta = 100000;
         
@@ -2490,24 +2478,19 @@ Move search_root(Position& root, int depth, int time_ms) {
             beta = std::min(100000, bestScore + delta);
         }
         
-        std::cerr << "DEBUG: Alpha=" << alpha << " Beta=" << beta << std::endl;
-        
         bool research = false;
-        int iteration_best = -100000;
+        int iteration_best = -30000; // Use proper negative infinity
         Move iteration_best_move = best;
         
-        int loop_count = 0;  // ADD THIS
+        int loop_count = 0;
         do {
-            std::cerr << "DEBUG: Aspiration loop iteration " << loop_count++ << std::endl;  // ADD THIS
-            
             // Prevent infinite loops in aspiration windows
             if (loop_count > 10) {
-                std::cerr << "DEBUG: Breaking aspiration loop after 10 iterations" << std::endl;
                 break;
             }
             
             research = false;
-            iteration_best = -100000;
+            iteration_best = -30000; // Use proper negative infinity
             int search_alpha = alpha;
             
 
@@ -2682,7 +2665,7 @@ Move search_root(Position& root, int depth, int time_ms) {
         if (iteration_best <= alpha || iteration_best >= beta) {
             research = true;
             if (iteration_best <= alpha) {
-                alpha = std::max(-100000, iteration_best - 25);
+                alpha = std::max(-30000, iteration_best - 25);
             }
             if (iteration_best >= beta) {
                 beta = std::min(100000, iteration_best + 25);
@@ -2704,7 +2687,6 @@ Move search_root(Position& root, int depth, int time_ms) {
         // If still no valid move found, try to return the first legal move
         if (!legal_moves_vec.empty()) {
             best = legal_moves_vec[0];
-            std::cerr << "DEBUG: Fallback to first legal move: " << move_to_uci(best) << std::endl;
         }
     }
 
@@ -2800,15 +2782,10 @@ void uci_loop() {
             // Limit maximum search depth to prevent stack overflow
             if (depth > 30) {
                 depth = 30;
-                std::cerr << "DEBUG: Limited search depth to 30 to prevent stack overflow" << std::endl;
             }
-
-            std::cerr << "DEBUG: Starting search with time_ms=" << time_ms << " depth=" << depth << std::endl;  // DEBUG OUTPUT
 
             Position p = g_current_position;
             Move m = search_root(p, depth, time_ms);
-
-            std::cerr << "DEBUG: Search returned move: " << move_to_uci(m) << std::endl;  // DEBUG OUTPUT
 
             // Note: search_root now prints the UCI 'bestmove' line directly before returning.
             // The engine previously printed 'bestmove' here; that output has been centralized to
