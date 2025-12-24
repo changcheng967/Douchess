@@ -2014,7 +2014,6 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int& halfmove_cloc
         make_move(pos, m, u_check, hc_check);
         int kingSq_check = lsb(pos.pieces[us_check][KING]);
         if (is_square_attacked(pos, kingSq_check, pos.side)) {
-            std::cerr << "DEBUG: Move " << move_to_uci(m) << " failed legality check during search" << std::endl;
             unmake_move(pos, m, u_check, halfmove_clock);
             continue;
         }
@@ -2511,7 +2510,7 @@ Move search_root(Position& root, int depth, int time_ms) {
             iteration_best = -100000;
             int search_alpha = alpha;
             
-            std::cerr << "DEBUG: About to search " << scored_moves.size() << " moves" << std::endl;  // ADD THIS
+
             
             for (int move_idx = 0; move_idx < scored_moves.size(); ++move_idx) {
                 if (g_stop_search.load()) break;
@@ -2524,13 +2523,12 @@ Move search_root(Position& root, int depth, int time_ms) {
                 make_move(root, m, u_check, hc_check);
                 int kingSq_check = lsb(root.pieces[us_check][KING]);
                 if (is_square_attacked(root, kingSq_check, root.side)) {
-                    std::cerr << "DEBUG: Move " << move_to_uci(m) << " failed legality check during search" << std::endl;
                     unmake_move(root, m, u_check, halfmove_clock);
                     continue;
                 }
                 unmake_move(root, m, u_check, halfmove_clock);
                 
-                std::cerr << "DEBUG: Trying move " << move_to_uci(m) << std::endl;  // ADD THIS
+
                 
                 Undo u;
                 int hc = halfmove_clock;
