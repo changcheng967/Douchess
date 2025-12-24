@@ -21,6 +21,10 @@ using U64 = unsigned long long;
 // CRITICAL FIX: Max Ply Safety Guard (Prevents Stack Overflow/Array Crashes)
 constexpr int MAX_PLY = 64;
 
+// [1] ADVANCED MOVE ORDERING & PRUNING CONSTANTS
+constexpr int LMP_DEPTH = 4;
+constexpr int LMP_COUNT[5] = {0, 3, 5, 8, 12}; // Pruning thresholds for depths 0-4
+
 // Forward declarations for structs
 struct Position;
 struct Move;
@@ -174,13 +178,13 @@ constexpr U64 bishopMagicNums[64] = {
 // Magic bitboard attack functions
 inline U64 rook_attacks(int sq, U64 occ) {
     U64 blockers = occ & rookMagics[sq].mask;
-    int idx = (blockers * rookMagics[sq].magic) >> rookMagics[sq].shift;
+    int idx = static_cast<int>((blockers * rookMagics[sq].magic) >> rookMagics[sq].shift);
     return rookMagics[sq].attacks[idx];
 }
 
 inline U64 bishop_attacks(int sq, U64 occ) {
     U64 blockers = occ & bishopMagics[sq].mask;
-    int idx = (blockers * bishopMagics[sq].magic) >> bishopMagics[sq].shift;
+    int idx = static_cast<int>((blockers * bishopMagics[sq].magic) >> bishopMagics[sq].shift);
     return bishopMagics[sq].attacks[idx];
 }
 
@@ -429,6 +433,18 @@ static int g_contempt = 10; // 10cp contempt (adjustable)
 static long long g_start_time = 0;
 static long long g_allocated_time = 0;
 
+/* ===============================
+   UCI POSITION MANAGEMENT
+ =============================== */
+
+// Global variables for UCI state management
+static int g_search_depth = 0;
+static int g_time_ms = 0;
+static int g_wtime = 0, g_btime = 0, g_winc = 0, g_binc = 0;
+static std::vector<std::string> g_move_history;
+static std::vector<U64> g_position_history;
+static std::atomic<int> g_nodes_searched(0);
+
 // Helper to check time dynamically during search
 void check_time() {
     if (g_stop_search.load()) return;
@@ -445,18 +461,6 @@ void check_time() {
         }
     }
 }
-
-/* ===============================
-   UCI POSITION MANAGEMENT
- =============================== */
-
-// Global variables for UCI state management
-static int g_search_depth = 0;
-static int g_time_ms = 0;
-static int g_wtime = 0, g_btime = 0, g_winc = 0, g_binc = 0;
-static std::vector<std::string> g_move_history;
-static std::vector<U64> g_position_history;
-static std::atomic<int> g_nodes_searched(0);
 
 /* ===============================
    INITIAL POSITION
@@ -1750,30 +1754,40 @@ int score_move(const Position& pos, const Move& m, const Move& tt_move, const Mo
     return history[pos.side][m.from][m.to] / 10;
 }
 
-// Static Exchange Evaluation - evaluate capture sequences
+// [2] BETTER SEE (STATIC EXCHANGE EVALUATION)
+// Ensure this function is robust (replace existing see if needed)
 int see(const Position& pos, const Move& m) {
-    int from = m.from;
-    int to = m.to;
+    int value = 0;
+    int from = m.from, to = m.to;
     
-    // Get piece values
-    int attacker = 0, victim = 0;
-    for (int p = 1; p <= 6; p++) {
-        if (pos.pieces[pos.side][p] & bit(from)) attacker = p;
-        if (pos.pieces[pos.side ^ 1][p] & bit(to)) victim = p;
+    // Initial capture value
+    int captured = 0;
+    for (int p=1; p<=6; p++) {
+         if (pos.pieces[pos.side^1][p] & bit(to)) { captured = p; break; }
     }
     
-    if (victim == 0) return 0; // Not a capture
+    // If en passant
+    if (m.promo == 0 && (pos.pieces[pos.side][PAWN] & bit(from)) && to == pos.ep) {
+        captured = PAWN;
+    }
     
-    // Simple SEE: victim value - attacker value
-    // (Full SEE would simulate the exchange sequence)
-    int see_score = pieceValue[victim] - pieceValue[attacker];
+    if (captured == 0 && m.promo == 0) return 0; // Quiet move -> 0 score for SEE
     
-    // Check if square is defended
+    value = pieceValue[captured] - pieceValue[0]; // (Note: pieceValue[0] is 0, just ensuring type)
+    if (m.promo) value += pieceValue[m.promo] - pieceValue[PAWN];
+
+    // Subtract attacker value if the square is defended
+    // (This is a "Quick SEE" - fully simulating swaps is expensive but better.
+    //  For this patch, we use a heuristic: if defended, we lose the attacker)
     if (is_square_attacked(pos, to, pos.side ^ 1)) {
-        see_score -= pieceValue[attacker]; // We lose our piece
+        int attacker = 0;
+        for (int p=1; p<=6; p++) {
+             if (pos.pieces[pos.side][p] & bit(from)) { attacker = p; break; }
+        }
+        value -= pieceValue[attacker];
     }
     
-    return see_score;
+    return value;
 }
 
 // Sort moves by score
@@ -1829,92 +1843,93 @@ int quiescence(Position& pos, int alpha, int beta, int ply) {
     return alpha;
 }
 
-// [PVS SEARCH UPDATE] - Optimized with time checks and ELO boosts
-// ---------------------------------------------------------
+// [3] OPTIMIZED PVS SEARCH with LMP & SEE PRUNING
+// Replace the previous pvs_search with this enhanced version
 int pvs_search(Position& pos, int depth, int alpha, int beta, int& halfmove_clock, std::vector<U64>& history, int ply, bool do_null, const Move& prev_move) {
-    // 1. Safety & Time Checks
     if (ply >= MAX_PLY) return evaluate(pos);
-    
-    // Periodically check time inside the recursion
     check_time();
-    
     if (g_stop_search.load()) return 0;
-    
     g_nodes_searched++;
 
-    // 2. Quiescence at leaf nodes
-    if (depth <= 0)
-        return quiescence(pos, alpha, beta, ply);
+    // QSearch at leaf
+    if (depth <= 0) return quiescence(pos, alpha, beta, ply);
 
-    // 3. Draw Detection & Pruning
+    // Draw/Repetition
     if (is_fifty_moves(halfmove_clock)) return 0;
     if (is_threefold(history, hash_position(pos))) return 0;
 
-    // Mate distance pruning
-    int alpha_orig = alpha;
+    // Mate Distance Pruning
     alpha = std::max(alpha, -30000 + ply);
     beta = std::min(beta, 30000 - ply);
     if (alpha >= beta) return alpha;
 
-    // 4. Transposition Table Probe
+    // TT Probe
     U64 key = hash_position(pos);
     TTEntry* tte = tt_probe(key);
-    Move tt_move = {0, 0, 0};
-    
+    Move tt_move = {0,0,0};
     if (tte->key == key) {
         if (tte->depth >= depth) {
             if (tte->flag == EXACT) return tte->score;
             if (tte->flag == LOWER && tte->score >= beta) return beta;
             if (tte->flag == UPPER && tte->score <= alpha) return alpha;
         }
+        // Use move from TT for ordering if plausible
+        // (Assuming you add move storage to TTEntry in the future, otherwise relies on history)
     }
 
-    // 5. Null Move Pruning (ELO Boost: More aggressive)
-    // Don't do null move in endgame (risk of zugzwang) or if we are in check
     bool in_check = is_square_attacked(pos, lsb(pos.pieces[pos.side][KING]), pos.side ^ 1);
-    
+
+    // Null Move Pruning
     if (do_null && !in_check && depth >= 3 && evaluate(pos) >= beta) {
-        // Adaptive R: R=3 for d>6, else 2 (Simple but effective)
-        int R = 2;
-        if (depth > 6) R = 3;
-        
-        pos.side ^= 1;
-        // Pass a null move (empty move)
+        int R = (depth > 6) ? 3 : 2;
+        pos.side ^= 1; int old_ep = pos.ep; pos.ep = -1;
         int score = -pvs_search(pos, depth - 1 - R, -beta, -beta + 1, halfmove_clock, history, ply + 1, false, {0,0,0});
-        pos.side ^= 1;
-        
+        pos.ep = old_ep; pos.side ^= 1;
         if (g_stop_search.load()) return 0;
         if (score >= beta) return beta;
     }
 
-    // 6. Move Generation & Ordering
+    // Move Gen & Sort
     std::vector<Move> moves;
     generate_moves(pos, moves);
-    
-    // Sort moves (Keep your existing MVV-LVA / History logic here)
     std::vector<ScoredMove> scored_moves;
     for (const auto& m : moves) scored_moves.push_back({m, 0});
     
-    // Note: You need to pass the killers/history correctly.
-    // Assuming score_move and sort_moves functions are available as per previous file.
+    // Score
     Move killer1 = killers[ply][0];
     Move killer2 = killers[ply][1];
-    
-    // Score moves
-    for (auto& sm : scored_moves) {
+    for (auto& sm : scored_moves)
         sm.score = score_move(pos, sm.move, g_tt_move, killer1, killer2, ply, prev_move);
-    }
     sort_moves(scored_moves);
 
-    // 7. Loop Moves
     int legal_moves = 0;
     int best_score = -30000;
     int tt_flag = UPPER;
     
     for (int i = 0; i < scored_moves.size(); ++i) {
         Move m = scored_moves[i].move;
+        bool is_capture = (pos.occ[pos.side^1] & bit(m.to)) || (m.promo && m.to == pos.ep); // Simple capture check
+
+        // --- PRUNING STEPS ---
         
-        // Pseudo-legal check (keep your existing logic)
+        // 1. SEE Pruning for bad captures
+        // Verify we aren't hanging a piece for nothing at low depths
+        if (depth < 4 && is_capture && legal_moves > 0 && !in_check) {
+            if (see(pos, m) < -50) continue; // Skip captures that lose >50cp
+        }
+
+        // 2. Late Move Pruning (LMP)
+        // If we have searched enough quiet moves at low depth, stop searching them
+        if (depth <= 4 && !in_check && !is_capture && legal_moves > LMP_COUNT[depth]) {
+            // Keep searching if it's a killer or promoter, otherwise skip
+            if (m.promo == 0 &&
+                !(m.from == killer1.from && m.to == killer1.to) &&
+                !(m.from == killer2.from && m.to == killer2.to)) {
+                continue;
+            }
+        }
+
+        // --- EXECUTE MOVE ---
         Undo u; int hc = halfmove_clock; int us = pos.side;
         make_move(pos, m, u, hc);
         
@@ -1922,86 +1937,64 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int& halfmove_cloc
             unmake_move(pos, m, u, halfmove_clock);
             continue;
         }
-        
         legal_moves++;
-        
-        // PVS Logic with LMR (Late Move Reduction)
+
+        // PVS
         int score;
         if (legal_moves == 1) {
             score = -pvs_search(pos, depth - 1, -beta, -alpha, hc, history, ply + 1, true, m);
         } else {
-            // LMR Logic - ELO Boost
-            // Reduce quiet moves at late indices
+            // LMR (Reduction)
             int reduction = 0;
-            if (depth >= 3 && i >= 3 && !(pos.occ[pos.side^1] & bit(m.to)) && !in_check) {
-                // Formula: Reduce deeper searches more
+            if (depth >= 3 && i >= 3 && !is_capture && !in_check) {
                 reduction = 1;
                 if (depth >= 6) reduction = 2;
-                if (i >= 8) reduction += 1;
+                if (i >= 8) reduction = 3;
             }
             
-            // Search with reduced depth, null window
             score = -pvs_search(pos, depth - 1 - reduction, -alpha - 1, -alpha, hc, history, ply + 1, true, m);
             
-            // Re-search if LMR failed (found better move)
-            if (score > alpha && reduction > 0) {
+            if (score > alpha && reduction > 0)
                  score = -pvs_search(pos, depth - 1, -alpha - 1, -alpha, hc, history, ply + 1, true, m);
-            }
             
-            // Full window re-search if PVS failed
-            if (score > alpha && score < beta) {
+            if (score > alpha && score < beta)
                 score = -pvs_search(pos, depth - 1, -beta, -alpha, hc, history, ply + 1, true, m);
-            }
         }
-        
+
         unmake_move(pos, m, u, halfmove_clock);
-        
-        if (g_stop_search.load()) return 0; // Immediate exit
-        
+        if (g_stop_search.load()) return 0;
+
         if (score > best_score) {
             best_score = score;
             if (score > alpha) {
                 alpha = score;
                 tt_flag = EXACT;
+                g_tt_move = m;
                 
-                // Update History
-                if (!(pos.occ[pos.side^1] & bit(m.to))) {
+                // History Update
+                if (!is_capture) {
                     ::history[pos.side][m.from][m.to] += depth * depth;
-                    if (prev_move.from != prev_move.to) {
-                         // (Counter move update logic here if desired)
-                         countermoves[prev_move.from][prev_move.to] = m;
+                    // Cap history
+                    if (::history[pos.side][m.from][m.to] > 9000) {
+                         for (int s=0;s<2;s++) for(int f=0;f<64;f++) for(int t=0;t<64;t++)
+                            ::history[s][f][t] /= 2;
                     }
-                }
-                
-                // Update Killers if not capture
-                if (!(pos.occ[pos.side^1] & bit(m.to))) {
                     killers[ply][1] = killers[ply][0];
                     killers[ply][0] = m;
                 }
             }
             if (alpha >= beta) {
                 tt_flag = LOWER;
-                break; // Beta Cutoff
+                break;
             }
         }
     }
-    
-    // Checkmate / Stalemate
-    if (legal_moves == 0) {
-        if (in_check) return -30000 + ply;
-        return 0;
-    }
-    
-    // Store TT (Generic replacement)
-    // Only store if we didn't abort
+
+    if (legal_moves == 0) return in_check ? -30000 + ply : 0;
+
     if (!g_stop_search.load()) {
-        tte->key = key;
-        tte->depth = depth;
-        tte->score = best_score;
-        tte->flag = tt_flag;
-        tte->age = 0; // Reset age for active entry
+        tte->key = key; tte->depth = depth; tte->score = best_score; tte->flag = tt_flag; tte->age = 0;
     }
-    
     return best_score;
 }
 
