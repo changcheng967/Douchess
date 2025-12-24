@@ -800,8 +800,12 @@ void generate_moves(Position& pos, std::vector<Move>& moves) {
     int us = pos.side;
     int them = us ^ 1;
     U64 own = pos.occ[us];
-    U64 opp = pos.occ[them];
     U64 all = pos.all;
+    
+    // [FIX] Define enemies valid for capture (Exclude Opponent King)
+    U64 enemy_king_bb = pos.pieces[them][KING];
+    U64 valid_targets = ~own & ~enemy_king_bb; // Target any square EXCEPT own pieces and enemy king
+    U64 capture_targets = pos.occ[them] & ~enemy_king_bb; // Specifically pieces we can capture
 
     /* ===================
        PAWNS
@@ -817,7 +821,7 @@ void generate_moves(Position& pos, std::vector<Move>& moves) {
         int f = sq % 8;
 
         int one = sq + forward;
-        // Single push
+        // Single push (quiet)
         if (one >= 0 && one < 64 && !(all & bit(one))) {
             if (r == promoRank) {
                 add_move(moves, sq, one, QUEEN);
@@ -828,7 +832,7 @@ void generate_moves(Position& pos, std::vector<Move>& moves) {
                 add_move(moves, sq, one);
             }
         }
-        // Double push
+        // Double push (quiet)
         if (r == startRank) {
             int two = sq + 2 * forward;
             int one_sq = sq + forward;
@@ -837,47 +841,34 @@ void generate_moves(Position& pos, std::vector<Move>& moves) {
             }
         }
 
-        // Captures
+        // Captures (Must check strict capture_targets)
         int capL = sq + forward - 1;
         int capR = sq + forward + 1;
-        // Left capture
-        if (f > 0 && capL >= 0 && capL < 64 && (opp & bit(capL))) {
+        
+        if (f > 0 && capL >= 0 && capL < 64 && (capture_targets & bit(capL))) {
             if (r == promoRank) {
-                add_move(moves, sq, capL, QUEEN);
-                add_move(moves, sq, capL, ROOK);
-                add_move(moves, sq, capL, BISHOP);
-                add_move(moves, sq, capL, KNIGHT);
-            } else {
-                add_move(moves, sq, capL);
-            }
+                add_move(moves, sq, capL, QUEEN); add_move(moves, sq, capL, ROOK);
+                add_move(moves, sq, capL, BISHOP); add_move(moves, sq, capL, KNIGHT);
+            } else add_move(moves, sq, capL);
         }
-        // Right capture
-        if (f < 7 && capR >= 0 && capR < 64 && (opp & bit(capR))) {
+        if (f < 7 && capR >= 0 && capR < 64 && (capture_targets & bit(capR))) {
             if (r == promoRank) {
-                add_move(moves, sq, capR, QUEEN);
-                add_move(moves, sq, capR, ROOK);
-                add_move(moves, sq, capR, BISHOP);
-                add_move(moves, sq, capR, KNIGHT);
-            } else {
-                add_move(moves, sq, capR);
-            }
+                add_move(moves, sq, capR, QUEEN); add_move(moves, sq, capR, ROOK);
+                add_move(moves, sq, capR, BISHOP); add_move(moves, sq, capR, KNIGHT);
+            } else add_move(moves, sq, capR);
         }
 
         // En passant
         if (pos.ep != -1) {
             int ep_rank = (us == WHITE) ? 4 : 3;
             if (r == ep_rank) {
-                // Left ep
                 if (f > 0 && sq + forward - 1 == pos.ep) {
-                    int ep_pawn_sq = pos.ep + ((us == WHITE) ? -8 : 8);
-                    if (ep_pawn_sq >= 0 && ep_pawn_sq < 64 && (pos.pieces[them][PAWN] & bit(ep_pawn_sq)))
-                        add_move(moves, sq, pos.ep);
+                    int ep_pawn = pos.ep + ((us == WHITE) ? -8 : 8);
+                    if (pos.pieces[them][PAWN] & bit(ep_pawn)) add_move(moves, sq, pos.ep);
                 }
-                // Right ep
                 if (f < 7 && sq + forward + 1 == pos.ep) {
-                    int ep_pawn_sq = pos.ep + ((us == WHITE) ? -8 : 8);
-                    if (ep_pawn_sq >= 0 && ep_pawn_sq < 64 && (pos.pieces[them][PAWN] & bit(ep_pawn_sq)))
-                        add_move(moves, sq, pos.ep);
+                    int ep_pawn = pos.ep + ((us == WHITE) ? -8 : 8);
+                    if (pos.pieces[them][PAWN] & bit(ep_pawn)) add_move(moves, sq, pos.ep);
                 }
             }
         }
@@ -889,10 +880,9 @@ void generate_moves(Position& pos, std::vector<Move>& moves) {
     U64 knights = pos.pieces[us][KNIGHT];
     while (knights) {
         int sq = poplsb(knights);
-        U64 moveset = knight_moves[sq] & ~own;
-        U64 at = moveset;
-        while (at)
-            add_move(moves, sq, poplsb(at));
+        // [FIX] Apply valid_targets mask (excludes King capture)
+        U64 moveset = knight_moves[sq] & valid_targets;
+        while (moveset) add_move(moves, sq, poplsb(moveset));
     }
 
     /* ===================
@@ -901,80 +891,55 @@ void generate_moves(Position& pos, std::vector<Move>& moves) {
     U64 bishops = pos.pieces[us][BISHOP];
     while (bishops) {
         int sq = poplsb(bishops);
-        U64 at = bishop_attacks(sq, all) & ~own;
-        while (at)
-            add_move(moves, sq, poplsb(at));
+        // [FIX] Apply valid_targets mask
+        U64 at = bishop_attacks(sq, all) & valid_targets;
+        while (at) add_move(moves, sq, poplsb(at));
     }
 
     U64 rooks = pos.pieces[us][ROOK];
     while (rooks) {
         int sq = poplsb(rooks);
-        U64 at = rook_attacks(sq, all) & ~own;
-        while (at)
-            add_move(moves, sq, poplsb(at));
+        // [FIX] Apply valid_targets mask
+        U64 at = rook_attacks(sq, all) & valid_targets;
+        while (at) add_move(moves, sq, poplsb(at));
     }
 
     U64 queens = pos.pieces[us][QUEEN];
     while (queens) {
         int sq = poplsb(queens);
-        U64 at = (rook_attacks(sq, all) |
-            bishop_attacks(sq, all)) & ~own;
-        while (at)
-            add_move(moves, sq, poplsb(at));
+        // [FIX] Apply valid_targets mask
+        U64 at = (rook_attacks(sq, all) | bishop_attacks(sq, all)) & valid_targets;
+        while (at) add_move(moves, sq, poplsb(at));
     }
 
     /* ===================
-        KING
+         KING
     =================== */
     U64 king_bb = pos.pieces[us][KING];
-    if (king_bb == 0) {
-        // No king - position is corrupted!
-        std::cerr << "ERROR: No king for side " << us << std::endl;
-        return;
+    if (king_bb) {
+        int ks = lsb(king_bb);
+        // [FIX] Apply valid_targets mask (King can't capture King anyway, but safe practice)
+        U64 kmoves = king_moves[ks] & valid_targets;
+        while (kmoves) add_move(moves, ks, poplsb(kmoves));
     }
-    
-    int ks = lsb(king_bb);
-    if (ks >= 64) {
-        std::cerr << "ERROR: Invalid king square " << ks << std::endl;
-        return;
-    }
-    
-    U64 kmoves = king_moves[ks] & ~own;
-    U64 at = kmoves;
-    while (at)
-        add_move(moves, ks, poplsb(at));
 
     /* ===================
        CASTLING
     =================== */
     if (us == WHITE) {
-        if ((pos.castling & 1) &&
-            !(all & 0x60ULL) &&
-            !is_square_attacked(pos, 4, BLACK) &&
-            !is_square_attacked(pos, 5, BLACK) &&
-            !is_square_attacked(pos, 6, BLACK))
+        if ((pos.castling & 1) && !(all & 0x60ULL) &&
+            !is_square_attacked(pos, 4, BLACK) && !is_square_attacked(pos, 5, BLACK) && !is_square_attacked(pos, 6, BLACK))
             add_move(moves, 4, 6);
-
-        if ((pos.castling & 2) &&
-            !(all & 0x0EULL) &&
-            !is_square_attacked(pos, 4, BLACK) &&
-            !is_square_attacked(pos, 3, BLACK) &&
-            !is_square_attacked(pos, 2, BLACK))
+        if ((pos.castling & 2) && !(all & 0x0EULL) &&
+            !is_square_attacked(pos, 4, BLACK) && !is_square_attacked(pos, 3, BLACK) && !is_square_attacked(pos, 2, BLACK))
             add_move(moves, 4, 2);
     }
     else {
-        if ((pos.castling & 4) &&
-            !(all & (0x60ULL << 56)) &&
-            !is_square_attacked(pos, 60, WHITE) &&
-            !is_square_attacked(pos, 61, WHITE) &&
-            !is_square_attacked(pos, 62, WHITE))
+        if ((pos.castling & 4) && !(all & (0x60ULL << 56)) &&
+            !is_square_attacked(pos, 60, WHITE) && !is_square_attacked(pos, 61, WHITE) && !is_square_attacked(pos, 62, WHITE))
             add_move(moves, 60, 62);
-
-        if ((pos.castling & 8) &&
-            !(all & (0x0EULL << 56)) &&
-            !is_square_attacked(pos, 60, WHITE) &&
-            !is_square_attacked(pos, 59, WHITE) &&
-            !is_square_attacked(pos, 58, WHITE))
+        if ((pos.castling & 8) && !(all & (0x0EULL << 56)) &&
+            !is_square_attacked(pos, 60, WHITE) && !is_square_attacked(pos, 59, WHITE) && !is_square_attacked(pos, 58, WHITE))
             add_move(moves, 60, 58);
     }
 }
