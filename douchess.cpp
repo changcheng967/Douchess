@@ -1459,7 +1459,7 @@ int evaluate(const Position& pos) {
     // The score calculation above already accounts for the side to move correctly
     // by using sign = (s == WHITE) ? 1 : -1 for each side's material
     // So we return the score as-is, since it's already in the correct perspective
-    return score;
+    return (pos.side == WHITE) ? score : -score;
 }
 
 /* ===============================
