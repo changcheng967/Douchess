@@ -238,6 +238,8 @@ U64 bishop_attack_on_the_fly(int sq, U64 blockers) {
 // Zobrist
 U64 zobrist[2][7][64];
 U64 zobristSide;
+U64 zobristCastling[16];
+U64 zobristEp[65]; // 0-63 squares, 64 = none
 
 void init_zobrist() {
     std::mt19937_64 rng(123456);
@@ -246,6 +248,10 @@ void init_zobrist() {
             for (int sq = 0; sq < 64; sq++)
                 zobrist[s][p][sq] = rng();
     zobristSide = rng();
+    
+    // [FIX] Initialize castling and en passant zobrist keys
+    for (int i = 0; i < 16; i++) zobristCastling[i] = rng();
+    for (int i = 0; i <= 64; i++) zobristEp[i] = rng();
 }
 
 // Correcting misplaced comment and ensuring proper declaration of pst array
@@ -472,6 +478,12 @@ U64 hash_position(const Position& pos) {
             }
         }
     }
+    
+    // [FIX] Include castling rights and en passant in hash
+    h ^= zobristCastling[pos.castling];
+    if (pos.ep != -1) h ^= zobristEp[pos.ep];
+    else h ^= zobristEp[64];
+    
     if (pos.side == BLACK) {
         h ^= zobristSide;
     }
@@ -2697,11 +2709,10 @@ Move search_root(Position& root, int depth, int time_ms) {
             return {0, 0, 0};
         }
         
-        // Update best score and move
-        if (iteration_best > bestScore) {
-            bestScore = iteration_best;
-            best = iteration_best_move;
-        }
+        // [FIX] Always update best move from the completed depth.
+        // Deeper search is always more accurate, even if the score is worse (e.g. we found out we are losing).
+        bestScore = iteration_best;
+        best = iteration_best_move;
         
         // Handle aspiration window research
         if (iteration_best <= alpha || iteration_best >= beta) {

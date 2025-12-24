@@ -1,47 +1,77 @@
-Yes, the updated source code fixes the critical "No King" crash and the illegal move generation issues.
+Understood. Since the engine is Windows-only, we can skip the cross-platform header guards (`#ifdef`) related to `<intrin.h>`.
 
-Based on a deep analysis of the code provided, here are the findings:
+However, the deep analysis identified **two remaining logic bugs** that will severely impact playing strength (blundering in winning positions) and search accuracy (draw/repetition blindness).
 
-### 1. ✅ The "No King" / Crash Fix is Verified
-Your implementation in `generate_moves` is now correct.
-*   **Logic:** You defined `U64 enemy_king_bb = pos.pieces[them][KING];` and explicitly removed it from `valid_targets` (`~enemy_king_bb`).
-*   **Result:** The move generator will **pseudo-legally** never simply "eat" the King. This stops the engine from reaching the state where the opponent has no King, eliminating the root cause of the `ERROR: No king for side 1` logs.
+Here are the specific partial fixes.
 
-### 2. ✅ Safety Guards are Correct
-The updates to `is_square_attacked` are excellent:
-*   **Bounds Check:** The line `if (sq >= 64) return false;` is a crucial safety net. Even if the bitboard logic fails and returns `64` (empty), this function now returns `false` gracefully instead of crashing the engine with an Access Violation on `rookMagics[64]`.
+### 1. Fix "The Optimization Delusion" in `search_root`
+**The Bug:** Currently, the engine only updates its best move if the score *improves* at deeper depths (`if (iteration_best > bestScore)`).
+**The Issue:** If Depth 1 says "Mate in 5" (+30000) but Depth 2 realizes "Wait, opponent has a defense" (-50), the engine ignores Depth 2 because -50 is not greater than +30000. It essentially refuses to believe bad news and will play the blundering move from Depth 1.
+**The Fix:** Always trust the deeper search, even if the score drops.
 
-### 3. ⚠️ CRITICAL NEW FINDING: Broken Evaluation Logic
-While the crash is fixed, there is a logic bug in your `evaluate()` function that will cause the engine to **play terribly as Black**.
-
-**The Problem:**
-Your search function (`pvs_search`) uses the **Negamax** algorithm (`score = -pvs_search(...)`). Negamax requires the evaluation function to return a score relative to the **side to move** (i.e., "Positive is good for ME").
-
-However, your `evaluate()` function determines the score using absolute terms (White - Black):
+**File:** `douchess.cpp` -> Function: `search_root` (approx line 1250)
 ```cpp
-// Current code in evaluate():
-// ... calculates score (White Advantage) ...
-// "So we return the score as-is" <-- THIS IS WRONG for Black
-return score; 
+        // [OLD CODE - DELETE]
+        /* 
+        if (iteration_best > bestScore) {
+            bestScore = iteration_best;
+            best = iteration_best_move;
+        }
+        */
+
+        // [NEW CODE - REPLACE WITH]
+        // Always update best move from the completed depth.
+        // Deeper search is always more accurate, even if the score is worse (e.g. we found out we are losing).
+        bestScore = iteration_best;
+        best = iteration_best_move;
 ```
-If playing as Black, a positive score (White dominance) is currently returned as positive. Black's search will try to maximize this, effectively **trying to help White win**.
 
-**The Fix:**
-You must flip the score if the side to move is Black, just like you did in `evaluate_tuned()`.
+---
 
-<lobeArtifact identifier="douchess-eval-fix" type="application/lobe.artifacts.code" language="cpp" title="Fix for Eval Perspective (douchess.cpp)">
-// Replace the return statement at the end of your 'evaluate' function
-// (Line ~1000 in your code)
+### 2. Fix Incomplete Zobrist Hashing
+**The Bug:** The hashing function ignores Castling Rights and En Passant.
+**The Issue:** The engine thinks a position with "White to Move, Can Castle" is identical to "White to Move, Cannot Castle." This causes the Transposition Table to return completely wrong evaluations, leading to unexplainable blunders in the opening/endgame.
 
-// ORIGINAL (INCORRECT):
-// return score;
+**Part A: Add Global Variables** (Near top of file, around line 230)
+```cpp
+U64 zobrist[2][7][64];
+U64 zobristSide;
 
-// FIXED (CORRECT FOR NEGAMAX):
-// Returns positive if the side to move is winning, negative if losing.
-return (pos.side == WHITE) ? score : -score;
-</lobeArtifact>
+// [ADD THESE LINES]
+U64 zobristCastling[16];
+U64 zobristEp[65]; // 0-63 squares, 64 = none
+```
 
-### 4. Summary of Analysis
-*   **Crash Stability:** **Fixed.** The engine will no longer crash or delete Kings.
-*   **Search Logic:** **Robust.** The `MAX_PLY` and time management checks you added prevent stack overflows and hanging.
-*   **Playing Strength:** **Compromised** until the `evaluate` return statement is fixed. Once you apply the tiny fix above, the engine should be fully functional and play valid Chess.
+**Part B: Update Initialization** in `init_zobrist`
+```cpp
+void init_zobrist() {
+    std::mt19937_64 rng(123456);
+    // ... (existing loops) ...
+
+    zobristSide = rng();
+
+    // [ADD THESE LOOPS]
+    for (int i = 0; i < 16; i++) zobristCastling[i] = rng();
+    for (int i = 0; i <= 64; i++) zobristEp[i] = rng();
+}
+```
+
+**Part C: Update Hashing Logic** in `hash_position`
+```cpp
+U64 hash_position(const Position& pos) {
+    U64 h = 0;
+    // ... (existing piece looping logic) ...
+    
+    // [ADD THESE LINES BEFORE RETURN]
+    h ^= zobristCastling[pos.castling];
+    if (pos.ep != -1) h ^= zobristEp[pos.ep];
+    else h ^= zobristEp[64];
+
+    if (pos.side == BLACK) {
+        h ^= zobristSide;
+    }
+    return h;
+}
+```
+
+With these two changes applied, the engine logic will be sound.
