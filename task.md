@@ -1,97 +1,102 @@
-The crash log `exit code -1073741819 (0xc0000005)` indicates an **Access Violation**. This means your engine attempted to read or write memory it wasn't allowed to access (e.g., accessing an array out of bounds, such as `board[64]` or `killers[100]`).
+The crash is persisting because while you added the recursion limits (`MAX_PLY`), there is still a critical **Array Out-Of-Bounds** vulnerability in `is_square_attacked`.
 
-**Short Answer:**
-**No**, the previous fix (for the resignation/timeout bug) will not fix this crash. This is a separate issue related to memory safety, likely caused by the search going deeper than your arrays allow (Depth 8+), or an invalid bitboard calculation.
+When the engine explores deep (Depth 8+), it occasionally generates a move that **captures the King** (which is illegal but possible in raw move generation). In the next step:
+1. The King is missing from the board.
+2. `lsb(king)` returns `64` (indicating "no king").
+3. Your code calls `is_square_attacked(..., 64, ...)`.
+4. Inside that function, it calls `rook_attacks(64, ...)`.
+5. `rook_attacks` tries to access `rookMagics[64]`. **CRASH** (Access Violation, as the array size is only 64).
 
-Here are the specific fixes required to stop the crashing.
+Here is the robust fix to stop the crashing completely.
 
-### The Fixes
-I have identified the 3 most likely causes of this crash in a C++ chess engine and provided the fixes below.
+### The Fix
 
-<lobeThinking>The user's engine is crashing with 0xc0000005 (Access Violation) at depth 8. This is distinct from the previous logic error. The crash happens during the search, likely due to a Stack Overflow (infinite recursion), Array Out of Bounds (MAX_PLY exceeded), or Unsafe Bit Manipulation (lsb(0) returning 64). I will provide a comprehensive "Stability Patch" artifact containing a safe `search` function with depth guards and a corrected `poplsb` routine to prevent invalid array access.</lobeThinking>
+Modify the `is_square_attacked` function to handle invalid squares safely.
 
-<lobeArtifact identifier="douchess-stability-patch" type="application/lobe.artifacts.code" language="cpp" title="Fixes for Access Violation (0xc0000005) Crash">
-// COPY AND PASTE THESE FIXES INTO douchess.cpp
+<lobeArtifact identifier="douchess-safety-patch-2" type="application/lobe.artifacts.code" language="cpp" title="Fix for Rook/Bishop Attack Crash (0xc0000005)">
+// Replace your existing 'is_square_attacked' function (around line 354) with this:
 
-// FIX 1: Max Ply Safety Guard (Prevents Stack Overflow/Array Crashes)
-// Add this constantly at the top of your file
-constexpr int MAX_PLY = 64; 
+bool is_square_attacked(const Position& pos, int sq, int bySide) {
+    // FIX: Safety guard. If 'sq' is 64 (meaning NO KING), return false immediately.
+    // Trying to calculate attacks for square 64 causes rookMagics[64] crash.
+    if (sq >= 64) return false;
 
-// Inside your 'search' and 'qsearch' functions, add this check at the very top:
-int search(Position& pos, int depth, int alpha, int beta, int ply, Move* best_move) {
-    // CRITICAL FIX: Stop recursion if we go too deep to prevent array crashes
-    if (ply >= MAX_PLY) return evaluate(pos);
+    U64 attackers = 0;
 
-    // ... rest of your search logic ...
-}
+    /* Pawns */
+    if (bySide == WHITE) {
+        attackers |= (pos.pieces[WHITE][PAWN] >> 7) & notHFile;
+        attackers |= (pos.pieces[WHITE][PAWN] >> 9) & notAFile;
+    }
+    else {
+        attackers |= (pos.pieces[BLACK][PAWN] << 7) & notAFile;
+        attackers |= (pos.pieces[BLACK][PAWN] << 9) & notHFile;
+    }
+    if (attackers & bit(sq)) return true;
 
-int qsearch(Position& pos, int alpha, int beta, int ply) {
-    // CRITICAL FIX: Stop recursion if we go too deep
-    if (ply >= MAX_PLY) return evaluate(pos);
+    /* Knights */
+    static const int knightOffsets[8] = { 17,15,10,6,-6,-10,-15,-17 };
+    U64 knights = pos.pieces[bySide][KNIGHT];
+    while (knights) {
+        int s = poplsb(knights);
+        int r = s / 8, f = s % 8;
+        for (int o : knightOffsets) {
+            int t = s + o;
+            if (t < 0 || t >= 64) continue;
+            int tr = t / 8, tf = t % 8;
+            if (abs(tr - r) > 2 || abs(tf - f) > 2) continue;
+            if (t == sq) return true;
+        }
+    }
 
-    // ... rest of qsearch logic ...
-}
+    /* Sliding - THIS SECTION WAS CAUSING THE CRASH */
+    // rook_attacks(64) accesses rookMagics[64] -> CRASH
+    // We already guarded sq >= 64 at the top, so this is now safe.
+    if (rook_attacks(sq, pos.all) &
+        (pos.pieces[bySide][ROOK] | pos.pieces[bySide][QUEEN]))
+        return true;
 
+    if (bishop_attacks(sq, pos.all) &
+        (pos.pieces[bySide][BISHOP] | pos.pieces[bySide][QUEEN]))
+        return true;
 
-// FIX 2: Safe Bitboard Access (Prevents board[64] crash)
-// Replace your existing 'poplsb' function with this safe version.
-// The previous version likely returned 64 for empty boards, causing crashes if used as board[poplsb(b)].
+    /* King */
+    static const int kingOffsets[8] = { 1,-1,8,-8,9,-9,7,-7 };
+    U64 king = pos.pieces[bySide][KING];
+    // Check if enemy king exists before reading its square
+    if (king) {
+        int ks = lsb(king);
+        int kr = ks / 8, kf = ks % 8;
+        for (int o : kingOffsets) {
+            int t = ks + o;
+            if (t < 0 || t >= 64) continue;
+            int tr = t / 8, tf = t % 8;
+            if (abs(tr - kr) > 1 || abs(tf - kf) > 1) continue;
+            if (t == sq) return true;
+        }
+    }
 
-inline int poplsb(U64& b) {
-    // If bitboard is empty, return a safe "invalid" value (like -1 or 64)
-    // BUT you must ensure your code doesn't use it as an array index blindly.
-    if (b == 0) return 64; 
-    
-    int s = lsb(b);
-    b &= b - 1; // Clear the least significant bit
-    return s;
-}
-
-// IMPORTANT: Review where you use poplsb inside the Board/Evaluation loops.
-// You must change loops like this:
-/*
-   // UNSAFE (Old Way):
-   int sq = poplsb(attacks);
-   int piece = board[sq]; // <--- CRASHES if sq is 64
-*/
-
-/* 
-   // SAFE (New Way):
-   while (attacks) {
-       int sq = poplsb(attacks);
-       if (sq >= 64) break; // Extra safety
-       // ... processing ...
-   }
-*/
-
-
-// FIX 3: Initialize Transposition Table (Prevents Garbage Pointer Crash)
-// In your 'main' function or 'uci_loop', before the loop starts:
-
-/* 
-   // Add this structure/array definition if missing
-   struct TTEntry { U64 key; int score; int depth; int flags; Move move; };
-   TTEntry TT[1000000]; // Ensure this size fits in your RAM (approx 16-20MB)
-*/
-
-// Add this to the 'ucinewgame' section in uci_loop:
-else if (token == "ucinewgame") {
-    // Clear TT to correct 0xc0000005 crashes from bad pointers
-    memset(TT, 0, sizeof(TT)); 
-    
-    // Reset other history tables
-    memset(history_moves, 0, sizeof(history_moves));
-    memset(killer_moves, 0, sizeof(killer_moves));
+    return false;
 }
 </lobeArtifact>
 
-### Summary of what went wrong:
-1.  **Depth 8 Crash:** The engine likely hit a position where `ply` exceeded your array limits (e.g., `killer_moves[ply]`), or it generated a move to an invalid square (index 64) because of a bitboard bug.
-2.  **Score `-786`**: This weird score suggests the engine was reading garbage memory just before it crashed (e.g., reading a score from uninitialized Transposition Table memory).
+### Optional: Fix Time Management (Infinite Search)
+I noticed your `search_root` function calculates time but **never actually stops** the search loop based on time. This is why it runs seemingly forever or until depth limit.
 
-**Next Steps:**
-1.  Apply the `MAX_PLY` checks in `search` and `qsearch`.
-2.  Clean the `poplsb` usage.
-3.  Ensure `ucinewgame` clears the memory (memset).
+In `search_root` (around line 1891), inside the loop, add this check:
 
-This should stabilize the engine and allow it to play beyond Depth 8.
+```cpp
+        // Output UCI info
+        auto now = high_resolution_clock::now();
+        auto elapsed_ms = duration_cast<milliseconds>(now - start).count();
+        
+        // ... (cout logic) ...
+
+        // FIX: Verify time limit
+        if (time_ms > 0 && elapsed_ms > time_ms) {
+             g_stop_search.store(true);
+             break; // Stop going to deeper depths
+        }
+```
+
+This will make your engine respect the time controls in the GUI.

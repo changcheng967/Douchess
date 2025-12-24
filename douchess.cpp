@@ -556,6 +556,10 @@ Position fen_to_position(const std::string& fen) {
 ================================ */
 
 bool is_square_attacked(const Position& pos, int sq, int bySide) {
+    // FIX: Safety guard. If 'sq' is 64 (meaning NO KING), return false immediately.
+    // Trying to calculate attacks for square 64 causes rookMagics[64] crash.
+    if (sq >= 64) return false;
+
     U64 attackers = 0;
 
     /* Pawns */
@@ -584,7 +588,9 @@ bool is_square_attacked(const Position& pos, int sq, int bySide) {
         }
     }
 
-    /* Sliding */
+    /* Sliding - THIS SECTION WAS CAUSING THE CRASH */
+    // rook_attacks(64) accesses rookMagics[64] -> CRASH
+    // We already guarded sq >= 64 at the top, so this is now safe.
     if (rook_attacks(sq, pos.all) &
         (pos.pieces[bySide][ROOK] | pos.pieces[bySide][QUEEN]))
         return true;
@@ -596,14 +602,17 @@ bool is_square_attacked(const Position& pos, int sq, int bySide) {
     /* King */
     static const int kingOffsets[8] = { 1,-1,8,-8,9,-9,7,-7 };
     U64 king = pos.pieces[bySide][KING];
-    int ks = lsb(king);
-    int kr = ks / 8, kf = ks % 8;
-    for (int o : kingOffsets) {
-        int t = ks + o;
-        if (t < 0 || t >= 64) continue;
-        int tr = t / 8, tf = t % 8;
-        if (abs(tr - kr) > 1 || abs(tf - kf) > 1) continue;
-        if (t == sq) return true;
+    // Check if enemy king exists before reading its square
+    if (king) {
+        int ks = lsb(king);
+        int kr = ks / 8, kf = ks % 8;
+        for (int o : kingOffsets) {
+            int t = ks + o;
+            if (t < 0 || t >= 64) continue;
+            int tr = t / 8, tf = t % 8;
+            if (abs(tr - kr) > 1 || abs(tf - kf) > 1) continue;
+            if (t == sq) return true;
+        }
     }
 
     return false;
@@ -2748,6 +2757,12 @@ Move search_root(Position& root, int depth, int time_ms) {
                   << " nodes " << g_nodes_searched.load()
                   << " time " << elapsed_ms
                   << " pv " << move_to_uci(iteration_best_move) << std::endl;
+
+        // FIX: Verify time limit
+        if (time_ms > 0 && elapsed_ms > time_ms) {
+             g_stop_search.store(true);
+             break; // Stop going to deeper depths
+        }
     }
     
     // CRITICAL FIX: Check if search was stopped due to time expiration
