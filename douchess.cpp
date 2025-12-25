@@ -31,6 +31,10 @@ struct Move;
 struct Undo;
 std::string move_to_uci(const Move& m); // Forward declaration for move_to_uci
 bool is_valid_move(const Move& m); // Forward declaration for move validation
+void generate_moves(Position& pos, std::vector<Move>& moves); // Forward declaration
+void make_move(Position& pos, const Move& m, Undo& u, int& halfmove_clock); // Forward declaration
+void unmake_move(Position& pos, const Move& m, const Undo& u, int& halfmove_clock); // Forward declaration
+bool is_square_attacked(const Position& pos, int sq, int bySide); // Forward declaration
 
 U64 knight_moves[64];
 U64 king_moves[64];
@@ -425,6 +429,45 @@ struct Position {
 // Global UCI position and stop flag
 static Position g_current_position; // will be initialized in main()
 static std::atomic<bool> g_stop_search(false);
+static Move g_tt_move = {0, 0, 0}; // Global TT move for move ordering
+
+// [PHASE 1] Root Move Structure for Iron Dome Legality
+struct RootMove {
+    Move move;
+    int score;
+    bool operator<(const RootMove& other) const {
+        return score > other.score; // Higher score first
+    }
+};
+
+// Global root moves list (sanitized and legal only)
+static std::vector<RootMove> g_root_moves;
+
+// [PHASE 1] Strict Root Move Sanitization - Generates ONLY legal moves
+void generate_root_moves(Position& pos, std::vector<RootMove>& root_moves) {
+    root_moves.clear();
+    std::vector<Move> pseudo_moves;
+    generate_moves(pos, pseudo_moves);
+    
+    for (const auto& m : pseudo_moves) {
+        Undo u;
+        int hc = 0;
+        int us = pos.side;
+        
+        make_move(pos, m, u, hc);
+        
+        // CRITICAL: Check if move leaves king in check
+        int kingSq = lsb(pos.pieces[us][KING]);
+        bool illegal = is_square_attacked(pos, kingSq, pos.side);
+        
+        unmake_move(pos, m, u, hc);
+        
+        // Only add if legal
+        if (!illegal) {
+            root_moves.push_back({m, 0});
+        }
+    }
+}
 
 // Global contempt value for draw avoidance
 static int g_contempt = 10; // 10cp contempt (adjustable)
@@ -826,10 +869,34 @@ void unmake_move(Position& pos, const Move& m, const Undo& u, int& halfmove_cloc
 
 /* ===============================
    MOVE GENERATION (LEGAL)
-================================ */
+ ================================ */
 
 inline void add_move(std::vector<Move>& moves, int from, int to, int promo = 0) {
     moves.push_back(Move{ from, to, promo });
+}
+
+// [PHASE 1] Generate only legal moves (for root validation)
+// This is slower but guarantees 100% legal moves
+void generate_legal_moves(Position& pos, std::vector<Move>& legal_moves) {
+    std::vector<Move> pseudo_moves;
+    generate_moves(pos, pseudo_moves);
+    legal_moves.clear();
+    
+    for (const auto& m : pseudo_moves) {
+        Undo u;
+        int hc = 0;
+        int us = pos.side;
+        
+        make_move(pos, m, u, hc);
+        
+        // Check if move leaves king in check
+        int kingSq = lsb(pos.pieces[us][KING]);
+        if (!is_square_attacked(pos, kingSq, pos.side)) {
+            legal_moves.push_back(m);
+        }
+        
+        unmake_move(pos, m, u, hc);
+    }
 }
 
 void generate_moves(Position& pos, std::vector<Move>& moves) {
@@ -1369,133 +1436,274 @@ int evaluate_king_safety(const Position& pos, int side) {
     return score;
 }
 
+// [PHASE 4] PeSTO Piece-Square Tables (Midgame and Endgame)
+// These tables provide positional understanding without training data
+static const int pesto_mg[7][64] = {
+    {0}, // Empty
+    // Pawn
+    { 0,  0,  0,  0,  0,  0,  0,  0,
+     50, 50, 50, 50, 50, 50, 50, 50,
+     10, 10, 20, 30, 30, 20, 10, 10,
+      5,  5, 10, 25, 25, 10,  5,  5,
+      0,  0,  0, 20, 20,  0,  0,  0,
+      5, -5,-10,  0,  0,-10, -5,  5,
+      5, 10, 10,-20,-20, 10, 10,  5,
+      0,  0,  0,  0,  0,  0,  0,  0},
+    // Knight
+    {-50,-40,-30,-30,-30,-30,-40,-50,
+     -40,-20,  0,  5,  5,  0,-20,-40,
+     -30,  5, 10, 15, 15, 10,  5,-30,
+     -30,  0, 15, 20, 20, 15,  0,-30,
+     -30,  5, 15, 20, 20, 15,  5,-30,
+     -30,  0, 10, 15, 15, 10,  0,-30,
+     -40,-20,  0,  0,  0,  0,-20,-40,
+     -50,-40,-30,-30,-30,-30,-40,-50},
+    // Bishop
+    {-20,-10,-10,-10,-10,-10,-10,-20,
+     -10,  5,  0,  0,  0,  0,  5,-10,
+     -10, 10, 10, 10, 10, 10, 10,-10,
+     -10,  0, 10, 10, 10, 10,  0,-10,
+     -10,  5,  5, 10, 10,  5,  5,-10,
+     -10,  0,  5, 10, 10,  5,  0,-10,
+     -10,  0,  0,  0,  0,  0,  0,-10,
+     -20,-10,-10,-10,-10,-10,-10,-20},
+    // Rook
+    { 0,  0,  0,  5,  5,  0,  0,  0,
+     -5,  0,  0,  0,  0,  0,  0, -5,
+     -5,  0,  0,  0,  0,  0,  0, -5,
+     -5,  0,  0,  0,  0,  0,  0, -5,
+     -5,  0,  0,  0,  0,  0,  0, -5,
+     -5,  0,  0,  0,  0,  0,  0, -5,
+      5, 10, 10, 10, 10, 10, 10,  5,
+      0,  0,  0,  0,  0,  0,  0,  0},
+    // Queen
+    {-20,-10,-10, -5, -5,-10,-10,-20,
+     -10,  0,  5,  0,  0,  0,  0,-10,
+     -10,  5,  5,  5,  5,  5,  0,-10,
+      -5,  0,  5,  5,  5,  5,  0, -5,
+       0,  0,  5,  5,  5,  5,  0, -5,
+     -10,  0,  5,  5,  5,  5,  0,-10,
+     -10,  0,  0,  0,  0,  0,  0,-10,
+     -20,-10,-10, -5, -5,-10,-10,-20},
+    // King
+    {-30,-40,-40,-50,-50,-40,-40,-30,
+     -30,-40,-40,-50,-50,-40,-40,-30,
+     -30,-40,-40,-50,-50,-40,-40,-30,
+     -30,-40,-40,-50,-50,-40,-40,-30,
+     -20,-30,-30,-40,-40,-30,-30,-20,
+     -10,-20,-20,-20,-20,-20,-20,-10,
+      20, 20,  0,  0,  0,  0, 20, 20,
+      20, 30, 10,  0,  0, 10, 30, 20}
+};
+
+static const int pesto_eg[7][64] = {
+    {0}, // Empty
+    // Pawn
+    { 0,  0,  0,  0,  0,  0,  0,  0,
+     50, 50, 50, 50, 50, 50, 50, 50,
+     30, 30, 40, 50, 50, 40, 30, 30,
+     20, 20, 30, 40, 40, 30, 20, 20,
+     10, 10, 20, 30, 30, 20, 10, 10,
+     10, 10, 20, 30, 30, 20, 10, 10,
+     20, 20, 30, 40, 40, 30, 20, 20,
+      0,  0,  0,  0,  0,  0,  0,  0},
+    // Knight
+    {-50,-40,-30,-30,-30,-30,-40,-50,
+     -40,-20,  0,  0,  0,  0,-20,-40,
+     -30,  0, 10, 15, 15, 10,  0,-30,
+     -30,  5, 15, 20, 20, 15,  5,-30,
+     -30,  5, 15, 20, 20, 15,  5,-30,
+     -30,  0, 10, 15, 15, 10,  0,-30,
+     -40,-20,  0,  5,  5,  0,-20,-40,
+     -50,-40,-30,-30,-30,-30,-40,-50},
+    // Bishop
+    {-20,-10,-10,-10,-10,-10,-10,-20,
+     -10,  0,  0,  0,  0,  0,  0,-10,
+     -10,  0,  5, 10, 10,  5,  0,-10,
+     -10,  5,  5, 10, 10,  5,  5,-10,
+     -10,  0, 10, 10, 10, 10,  0,-10,
+     -10, 10, 10, 10, 10, 10, 10,-10,
+     -10,  5,  0,  0,  0,  0,  5,-10,
+     -20,-10,-10,-10,-10,-10,-10,-20},
+    // Rook
+    { 0,  0,  0,  0,  0,  0,  0,  0,
+      0,  0,  0,  0,  0,  0,  0,  0,
+      0,  0,  0,  0,  0,  0,  0,  0,
+      0,  0,  0,  0,  0,  0,  0,  0,
+      0,  0,  0,  0,  0,  0,  0,  0,
+      0,  0,  0,  0,  0,  0,  0,  0,
+      0,  0,  0,  0,  0,  0,  0,  0,
+      0,  0,  0,  0,  0,  0,  0,  0},
+    // Queen
+    {-10, -5, -5,  0,  0, -5, -5,-10,
+      -5,  0,  0,  0,  0,  0,  0, -5,
+      -5,  0,  5,  5,  5,  5,  0, -5,
+       0,  0,  5,  5,  5,  5,  0, -5,
+       0,  0,  5,  5,  5,  5,  0, -5,
+      -5,  0,  5,  5,  5,  5,  0, -5,
+      -5,  0,  0,  0,  0,  0,  0, -5,
+     -10, -5, -5,  0,  0, -5, -5,-10},
+    // King
+    {-50,-40,-30,-20,-20,-30,-40,-50,
+     -30,-20,-10,  0,  0,-10,-20,-30,
+     -30,-10, 20, 30, 30, 20,-10,-30,
+     -30,-10, 30, 40, 40, 30,-10,-30,
+     -30,-10, 30, 40, 40, 30,-10,-30,
+     -30,-10, 20, 30, 30, 20,-10,-30,
+     -30,-30,  0,  0,  0,  0,-30,-30,
+     -50,-30,-30,-30,-30,-30,-30,-50}
+};
+
+// PeSTO piece values (match the tables)
+static const int pesto_values[] = {0, 100, 320, 330, 500, 900, 20000};
+
 int evaluate(const Position& pos) {
     if (g_stop_search.load()) return 0;
+    
     int score = 0;
     
     // Calculate game phase (0 = endgame, 256 = midgame)
-    int white_material = count_material(pos, WHITE);
-    int black_material = count_material(pos, BLACK);
-    
-    // Phase calculation based on material
     int phase = 256;
-    phase -= (white_material + black_material) / 64; // Simplified phase calculation
+    int non_pawn_material = 0;
     
+    for (int s = 0; s < 2; s++) {
+        for (int p = KNIGHT; p <= QUEEN; p++) {
+            non_pawn_material += (int)__popcnt64(pos.pieces[s][p]) * pesto_values[p];
+        }
+    }
+    
+    // Phase calculation: reduce based on material
+    phase = std::max(0, phase - (non_pawn_material / 64));
+    
+    // PeSTO evaluation
     for (int s = 0; s < 2; s++) {
         int sign = (s == WHITE) ? 1 : -1;
         
-        // Material and PST evaluation
-        for (int p = 1; p <= 6; p++) {
+        for (int p = PAWN; p <= KING; p++) {
             U64 bb = pos.pieces[s][p];
             while (bb) {
                 int sq = poplsb(bb);
                 int psq = (s == WHITE) ? sq : (sq ^ 56);
                 
-                // Tapered evaluation: interpolate between midgame and endgame
-                int mg_value = pieceValue[p] + pst_midgame[p][psq];
-                int eg_value = pieceValue[p] + pst_endgame[p][psq];
+                int mg = pesto_values[p] + pesto_mg[p][psq];
+                int eg = pesto_values[p] + pesto_eg[p][psq];
                 
-                // Interpolate based on phase
-                int value = (mg_value * phase + eg_value * (256 - phase)) / 256;
-                
+                // Tapered evaluation
+                int value = (mg * phase + eg * (256 - phase)) / 256;
                 score += sign * value;
             }
         }
-        
-        // Mobility evaluation
-        int mobility = 0;
-        mobility += count_mobility(pos, s, KNIGHT) * 5;   // Knights value mobility
-        mobility += count_mobility(pos, s, BISHOP) * 4;   // Bishops value mobility
-        mobility += count_mobility(pos, s, ROOK) * 2;     // Rooks value mobility
-        mobility += count_mobility(pos, s, QUEEN) * 1;    // Queens already strong
-        score += sign * mobility;
-        
-        // Pawn structure evaluation
-        int pawn_structure = evaluate_pawn_structure(pos, s);
-        score += sign * pawn_structure;
-        
-        // King safety evaluation
-        int king_safety = evaluate_king_safety(pos, s);
-        score += sign * king_safety;
     }
     
-    // Add contempt - encourages winning, discourages draws
-    score += (pos.side == WHITE) ? g_contempt : -g_contempt;
-    
-    // Bishop pair bonus
-    if (__popcnt64(pos.pieces[WHITE][BISHOP]) >= 2) score += 50;
-    if (__popcnt64(pos.pieces[BLACK][BISHOP]) >= 2) score -= 50;
-    
-    // Rook on open file bonus
+    // Mobility (simplified)
+    int mobility = 0;
     for (int s = 0; s < 2; s++) {
         int sign = (s == WHITE) ? 1 : -1;
-        U64 rooks = pos.pieces[s][ROOK];
-        while (rooks) {
-            int sq = poplsb(rooks);
-            int file = sq % 8;
-            U64 file_mask = 0x0101010101010101ULL << file;
-            
-            // Open file (no pawns)
-            if (!(pos.pieces[WHITE][PAWN] & file_mask) && !(pos.pieces[BLACK][PAWN] & file_mask)) {
-                score += sign * 20;
-            }
-            // Semi-open file (no friendly pawns)
-            else if (!(pos.pieces[s][PAWN] & file_mask)) {
-                score += sign * 10;
-            }
-        }
-    }
-    
-    // Knight outpost bonus
-    for (int s = 0; s < 2; s++) {
-        int sign = (s == WHITE) ? 1 : -1;
+        U64 all = pos.all;
+        
+        // Knights
         U64 knights = pos.pieces[s][KNIGHT];
         while (knights) {
             int sq = poplsb(knights);
+            U64 attacks = knight_moves[sq] & ~pos.occ[s];
+            mobility += sign * (int)__popcnt64(attacks) * 2;
+        }
+        
+        // Bishops
+        U64 bishops = pos.pieces[s][BISHOP];
+        while (bishops) {
+            int sq = poplsb(bishops);
+            U64 attacks = bishop_attacks(sq, all) & ~pos.occ[s];
+            mobility += sign * (int)__popcnt64(attacks) * 2;
+        }
+        
+        // Rooks
+        U64 rooks = pos.pieces[s][ROOK];
+        while (rooks) {
+            int sq = poplsb(rooks);
+            U64 attacks = rook_attacks(sq, all) & ~pos.occ[s];
+            mobility += sign * (int)__popcnt64(attacks) * 1;
+        }
+    }
+    score += mobility;
+    
+    // Pawn structure (simplified)
+    for (int s = 0; s < 2; s++) {
+        int sign = (s == WHITE) ? 1 : -1;
+        U64 pawns = pos.pieces[s][PAWN];
+        
+        // Doubled pawns penalty
+        for (int f = 0; f < 8; f++) {
+            U64 file_pawns = pawns & (0x0101010101010101ULL << f);
+            int count = (int)__popcnt64(file_pawns);
+            if (count > 1) score -= sign * 20 * (count - 1);
+        }
+        
+        // Passed pawns bonus
+        U64 enemy_pawns = pos.pieces[s^1][PAWN];
+        while (pawns) {
+            int sq = poplsb(pawns);
             int rank = sq / 8;
             int file = sq % 8;
             
-            // Outpost: advanced, protected by pawn, can't be attacked by enemy pawns
-            bool is_outpost = false;
-            if (s == WHITE && rank >= 4 && rank <= 6) {
-                // Check if protected by pawn
-                if ((file > 0 && (pos.pieces[WHITE][PAWN] & bit(sq - 9))) ||
-                    (file < 7 && (pos.pieces[WHITE][PAWN] & bit(sq - 7)))) {
-                    // Check if enemy pawns can't attack
-                    bool can_be_attacked = false;
-                    for (int r = rank - 1; r >= 0; r--) {
-                        if ((file > 0 && (pos.pieces[BLACK][PAWN] & bit(r * 8 + file - 1))) ||
-                            (file < 7 && (pos.pieces[BLACK][PAWN] & bit(r * 8 + file + 1)))) {
-                            can_be_attacked = true;
-                            break;
-                        }
-                    }
-                    if (!can_be_attacked) is_outpost = true;
-                }
-            } else if (s == BLACK && rank >= 1 && rank <= 3) {
-                // Similar for black
-                if ((file > 0 && (pos.pieces[BLACK][PAWN] & bit(sq + 9))) ||
-                    (file < 7 && (pos.pieces[BLACK][PAWN] & bit(sq + 7)))) {
-                    bool can_be_attacked = false;
-                    for (int r = rank + 1; r < 8; r++) {
-                        if ((file > 0 && (pos.pieces[WHITE][PAWN] & bit(r * 8 + file - 1))) ||
-                            (file < 7 && (pos.pieces[WHITE][PAWN] & bit(r * 8 + file + 1)))) {
-                            can_be_attacked = true;
-                            break;
-                        }
-                    }
-                    if (!can_be_attacked) is_outpost = true;
+            bool passed = true;
+            for (int f = std::max(0, file-1); f <= std::min(7, file+1); f++) {
+                U64 forward = (s == WHITE) ?
+                    ((1ULL << (rank+1)) - 1) << (f*8) :
+                    ((1ULL << (8-rank)) - 1) << (f*8);
+                if (enemy_pawns & forward) {
+                    passed = false;
+                    break;
                 }
             }
             
-            if (is_outpost) score += sign * 30;
+            if (passed) {
+                int bonus = (s == WHITE) ? (rank * 10) : ((7-rank) * 10);
+                score += sign * bonus;
+            }
         }
     }
     
-    // CRITICAL FIX: Ensure evaluation is always from the perspective of the side to move
-    // The score calculation above already accounts for the side to move correctly
-    // by using sign = (s == WHITE) ? 1 : -1 for each side's material
-    // So we return the score as-is, since it's already in the correct perspective
+    // King safety (simplified)
+    for (int s = 0; s < 2; s++) {
+        int sign = (s == WHITE) ? 1 : -1;
+        U64 king = pos.pieces[s][KING];
+        if (king) {
+            int sq = lsb(king);
+            int file = sq % 8;
+            
+            // Penalty for open files near king
+            U64 file_mask = 0x0101010101010101ULL << file;
+            if (!(pos.pieces[s][PAWN] & file_mask)) {
+                score -= sign * 15;
+            }
+            
+            // Penalty for enemy pieces near king
+            U64 enemy = pos.pieces[s^1][QUEEN] | pos.pieces[s^1][ROOK];
+            U64 king_zone = 0;
+            int r = sq / 8, f = sq % 8;
+            for (int dr = -2; dr <= 2; dr++) {
+                for (int df = -2; df <= 2; df++) {
+                    int nr = r + dr, nf = f + df;
+                    if (nr >= 0 && nr < 8 && nf >= 0 && nf < 8) {
+                        king_zone |= bit(nr * 8 + nf);
+                    }
+                }
+            }
+            if (enemy & king_zone) {
+                score -= sign * 10 * (int)__popcnt64(enemy & king_zone);
+            }
+        }
+    }
+    
+    // Bishop pair bonus
+    if ((int)__popcnt64(pos.pieces[WHITE][BISHOP]) >= 2) score += 50;
+    if ((int)__popcnt64(pos.pieces[BLACK][BISHOP]) >= 2) score -= 50;
+    
+    // Contempt (encourage winning, discourage draws)
+    score += (pos.side == WHITE) ? g_contempt : -g_contempt;
+    
+    // Return from side to move perspective
     return (pos.side == WHITE) ? score : -score;
 }
 
@@ -1590,8 +1798,8 @@ int evaluate_tuned(const Position& pos) {
     score += (pos.side == WHITE) ? g_contempt : -g_contempt;
     
     // Bishop pair bonus with tuning
-    if (__popcnt64(pos.pieces[WHITE][BISHOP]) >= 2) score += g_eval_params.bishop_pair_bonus;
-    if (__popcnt64(pos.pieces[BLACK][BISHOP]) >= 2) score -= g_eval_params.bishop_pair_bonus;
+    if ((int)__popcnt64(pos.pieces[WHITE][BISHOP]) >= 2) score += g_eval_params.bishop_pair_bonus;
+    if ((int)__popcnt64(pos.pieces[BLACK][BISHOP]) >= 2) score -= g_eval_params.bishop_pair_bonus;
     
     // Rook on open file bonus
     for (int s = 0; s < 2; s++) {
@@ -1690,7 +1898,6 @@ struct ScoredMove {
 };
 
 Move killers[100][2]; // [ply][slot]
-Move g_tt_move; // store last best move globally (simple)
 int history[2][64][64]; // [side][from][to] - History heuristic
 Move countermoves[64][64]; // [from][to] -> countermove
 int continuation_history[2][6][64]; // [side][piece][to] - simplified for memory efficiency
@@ -2333,8 +2540,7 @@ Move parse_uci_move(const Position& pos, const std::string& uci) {
 // Forward declare pvs_search for use in search_root
 int pvs_search(Position& pos, int depth, int alpha, int beta, int& halfmove_clock, std::vector<U64>& history, int ply, bool do_null, const Move& prev_move);
 
-// [SEARCH ROOT UPDATE] - Replaces existing search_root function
-// ---------------------------------------------------------
+// [PHASE 1 & 2] Root Search with Legal Move Validation and Strict Time Management
 Move search_root(Position& root, int depth, int time_ms) {
     using namespace std::chrono;
     
@@ -2344,89 +2550,122 @@ Move search_root(Position& root, int depth, int time_ms) {
     g_allocated_time = time_ms;
     g_start_time = duration_cast<milliseconds>(high_resolution_clock::now().time_since_epoch()).count();
 
-    // Initial Move Gen for Root
-    Move best_root_move = {0, 0, 0};
-    std::vector<Move> moves;
-    generate_moves(root, moves);
+    // [PHASE 1] CRITICAL FIX: Strict Root Move Sanitization
+    // Generate ONLY legal moves for root - never trust pseudo-legal moves
+    generate_root_moves(root, g_root_moves);
     
-    // Filter legal moves first
-    std::vector<Move> legal_moves_vec;
-    for (const auto& m : moves) {
-        Undo u; int hc = 0; int us = root.side;
-        make_move(root, m, u, hc);
-        if (!is_square_attacked(root, lsb(root.pieces[us][KING]), root.side)) {
-            legal_moves_vec.push_back(m);
-        }
-        unmake_move(root, m, u, hc);
+    if (g_root_moves.empty()) {
+        // Checkmate or stalemate
+        return {0, 0, 0};
+    }
+    
+    // If only one legal move, play it immediately (saves time)
+    if (g_root_moves.size() == 1) {
+        std::cout << "info depth 0 score cp 0 nodes 0 time 0 pv " << move_to_uci(g_root_moves[0].move) << std::endl;
+        std::cout << "bestmove " << move_to_uci(g_root_moves[0].move) << std::endl;
+        return g_root_moves[0].move;
     }
 
-    if (legal_moves_vec.empty()) return {0,0,0};
+    // Store best move from previous completed depth
+    Move best_move = g_root_moves[0].move;
+    Move previous_best = best_move;
+    int previous_best_score = -30000;
     
-    // Initial guess
-    best_root_move = legal_moves_vec[0];
-
     // Iterative Deepening
     for (int d = 1; d <= depth; ++d) {
-        
         int alpha = -30000;
         int beta = 30000;
-        int iteration_score = -30000;
-        Move iteration_best_move = best_root_move;
-        
-        // Aspiration Windows
-        // If previous depth score is available and stable, narrow window
-        // (Simplified for robustness: Full window at low depths, aspiration at high)
-        if (d >= 5) {
-            alpha = -30000; // Resetting to full window repeatedly is safer for buggy engines
-            beta = 30000;   // but you can implement aspiration logic here if debugged
-        }
-
-        // Start search for this depth
-        // We replicate root logic similar to search but handling the best move
-        
-        int alpha_temp = alpha;
-        Move temp_best = iteration_best_move;
-        int temp_score = -30000;
-        
-        // Root Move Loop (Basic Ordering)
-        // Sort legal_moves_vec based on previous best_root_move
-        std::vector<ScoredMove> root_moves;
-        for(auto& m : legal_moves_vec) {
-            int score = 0;
-            if (m.from == best_root_move.from && m.to == best_root_move.to) score = 1000000;
-            root_moves.push_back({m, score});
-        }
-        sort_moves(root_moves);
-        
+        int best_score = -30000;
+        Move iteration_best = best_move;
         bool depth_completed = true;
         
-        for (int i = 0; i < root_moves.size(); ++i) {
-            Move m = root_moves[i].move;
+        // [PHASE 1] Atomic Time-Abort Protocol
+        // Check time before starting new depth
+        auto now = high_resolution_clock::now();
+        auto start = time_point<high_resolution_clock>(milliseconds(g_start_time));
+        auto elapsed = duration_cast<milliseconds>(now - start).count();
+        
+        // Leave 50ms buffer for final move output
+        if (time_ms > 0 && elapsed > (time_ms - 50)) {
+            break;
+        }
+        
+        // Move Ordering: TT move first, then captures, then others
+        std::vector<ScoredMove> ordered_moves;
+        for (const auto& rm : g_root_moves) {
+            const Move& m = rm.move;
+            int score = 0;
+            
+            // TT move gets highest priority (from previous depth)
+            if (m.from == previous_best.from && m.to == previous_best.to) {
+                score = 1000000;
+            }
+            // Captures get priority (MVV-LVA approximation)
+            else if (root.occ[root.side ^ 1] & bit(m.to)) {
+                int victim = 0;
+                for (int p = 1; p <= 6; p++) {
+                    if (root.pieces[root.side ^ 1][p] & bit(m.to)) {
+                        victim = p;
+                        break;
+                    }
+                }
+                score = 10000 + (victim * 100);
+            }
+            // Promotions
+            else if (m.promo) {
+                score = 5000;
+            }
+            
+            ordered_moves.push_back({m, score});
+        }
+        sort_moves(ordered_moves);
+        
+        int alpha_temp = alpha;
+        
+        // Search each move
+        for (int i = 0; i < ordered_moves.size(); ++i) {
+            Move m = ordered_moves[i].move;
             Undo u; int hc = 0; std::vector<U64> h;
-            h.push_back(hash_position(root)); // dummy history
+            h.push_back(hash_position(root));
             
             make_move(root, m, u, hc);
             
             int score;
             if (i == 0) {
-                 score = -pvs_search(root, d - 1, -beta, -alpha_temp, hc, h, 1, true, m);
+                // First move: full window
+                score = -pvs_search(root, d - 1, -beta, -alpha_temp, hc, h, 1, true, m);
             } else {
-                 score = -pvs_search(root, d - 1, -alpha_temp - 1, -alpha_temp, hc, h, 1, true, m);
-                 if (score > alpha_temp && score < beta) {
-                     score = -pvs_search(root, d - 1, -beta, -alpha_temp, hc, h, 1, true, m);
-                 }
+                // Other moves: zero window
+                score = -pvs_search(root, d - 1, -alpha_temp - 1, -alpha_temp, hc, h, 1, true, m);
+                
+                // Re-search if it failed high
+                if (score > alpha_temp && score < beta) {
+                    score = -pvs_search(root, d - 1, -beta, -alpha_temp, hc, h, 1, true, m);
+                }
             }
             
             unmake_move(root, m, u, hc);
             
+            // [PHASE 1] CRITICAL: Check for time abort
             if (g_stop_search.load()) {
-                depth_completed = false; // Flag that we aborted!
+                depth_completed = false;
                 break;
             }
             
-            if (score > temp_score) {
-                temp_score = score;
-                temp_best = m;
+            // Check time during search (every 8 moves)
+            if ((i & 7) == 0) {
+                now = high_resolution_clock::now();
+                elapsed = duration_cast<milliseconds>(now - start).count();
+                if (time_ms > 0 && elapsed > (time_ms - 50)) {
+                    g_stop_search.store(true);
+                    depth_completed = false;
+                    break;
+                }
+            }
+            
+            if (score > best_score) {
+                best_score = score;
+                iteration_best = m;
             }
             
             if (score > alpha_temp) {
@@ -2434,37 +2673,38 @@ Move search_root(Position& root, int depth, int time_ms) {
             }
         }
         
-        // CRITICAL FIX: Only update global best move if depth completed!
-        // This prevents the "Time Management Blunder" where the engine returns
-        // a move from a 10% calculated depth which is often worse than previous depth.
-        if (depth_completed) {
-            best_root_move = temp_best;
+        // [PHASE 1] SAFETY VALVE: Only update if depth completed
+        // If timeout occurs, DISCARD Depth N results, use Depth N-1
+        if (depth_completed && !g_stop_search.load()) {
+            best_move = iteration_best;
+            previous_best = iteration_best;
+            previous_best_score = best_score;
             
-            // Output Info
-            auto now = high_resolution_clock::now();
-            auto start = time_point<high_resolution_clock>(milliseconds(g_start_time));
-            auto elapsed = duration_cast<milliseconds>(now - start).count();
+            // Output info
+            now = high_resolution_clock::now();
+            start = time_point<high_resolution_clock>(milliseconds(g_start_time));
+            elapsed = duration_cast<milliseconds>(now - start).count();
             
             std::cout << "info depth " << d
-                      << " score cp " << temp_score
+                      << " score cp " << best_score
                       << " nodes " << g_nodes_searched.load()
                       << " time " << elapsed
-                      << " pv " << move_to_uci(best_root_move) << std::endl;
+                      << " pv " << move_to_uci(best_move) << std::endl;
         } else {
-            break; // Stop iterating depths
-        }
-        
-        // Check time between depths (in case the last move finished exactly at limit)
-        auto now = high_resolution_clock::now();
-        auto start = time_point<high_resolution_clock>(milliseconds(g_start_time));
-        if (time_ms > 0 && duration_cast<milliseconds>(now - start).count() > time_ms) {
+            // [PHASE 1] CRITICAL FIX: Timeout occurred
+            // DISCARD current depth results, use previous depth
+            if (d > 1) {
+                std::cout << "info string Timeout - using depth " << (d-1) << " result" << std::endl;
+                best_move = previous_best;
+                best_score = previous_best_score;
+            }
             break;
         }
     }
 
     // Always print bestmove
-    std::cout << "bestmove " << move_to_uci(best_root_move) << std::endl;
-    return best_root_move;
+    std::cout << "bestmove " << move_to_uci(best_move) << std::endl;
+    return best_move;
 }
 
 // ===============================
@@ -2501,7 +2741,7 @@ void uci_loop() {
             memset(continuation_history, 0, sizeof(continuation_history));
             
             // Reset global move and TT move
-            g_tt_move = {0, 0, 0};
+            g_tt_move = Move{0, 0, 0};
         } else if (token == "position") {
             std::string sub;
             iss >> sub;
@@ -2568,6 +2808,16 @@ void uci_loop() {
                 }
             }
 
+            // [PHASE 4] Hard Time Cap: 950ms for 1000ms limit
+            // This leaves 50ms for cleanup and output
+            if (movetime > 0) {
+                time_ms = std::min(movetime, 950);
+            } else if (time_ms > 0) {
+                time_ms = std::min(time_ms, 950);
+            } else {
+                time_ms = 950; // Default safety cap
+            }
+
             // Limit maximum search depth to prevent stack overflow
             if (depth > 30) {
                 depth = 30;
@@ -2598,7 +2848,7 @@ void init_search() {
     }
     
     // Initialize TT move
-    g_tt_move = {0, 0, 0};
+    g_tt_move = Move{0, 0, 0};
     
     // Initialize history
     for (int s = 0; s < 2; s++) {
