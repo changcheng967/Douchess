@@ -13,6 +13,8 @@
 #include <string>
 #include <map>
 #include <set>
+#include <cstring> // For memset
+#include <xmmintrin.h> // For prefetching
 
 using namespace std;
 
@@ -25,17 +27,98 @@ constexpr int MAX_PLY = 64;
 constexpr int LMP_DEPTH = 4;
 constexpr int LMP_COUNT[5] = {0, 3, 5, 8, 12}; // Pruning thresholds for depths 0-4
 
+// [PHASE 5] Enhanced move ordering constants
+constexpr int KILLER_SLOTS = 4;
+constexpr int HISTORY_GRAVITY = 16384;
+
 // Forward declarations for structs
 struct Position;
 struct Move;
 struct Undo;
-std::string move_to_uci(const Move& m); // Forward declaration for move_to_uci
-bool is_valid_move(const Move& m); // Forward declaration for move validation
-void generate_moves(Position& pos, std::vector<Move>& moves); // Forward declaration
-void make_move(Position& pos, const Move& m, Undo& u, int& halfmove_clock); // Forward declaration
-void unmake_move(Position& pos, const Move& m, const Undo& u, int& halfmove_clock); // Forward declaration
-bool is_square_attacked(const Position& pos, int sq, int bySide); // Forward declaration
 
+// [PHASE 6] UCI Options and constants
+constexpr int TT_SIZE = 1 << 20; // 1M entries
+
+// Enums for TT flags
+enum { EXACT, LOWER, UPPER };
+
+// TTEntry structure
+struct TTEntry {
+    U64 key;        // Full 64-bit key for collision detection
+    int depth;
+    int score;
+    int flag;
+    int age;        // NEW: for replacement scheme
+};
+
+// Piece values
+const int pieceValue[7] = {0, 100, 320, 330, 500, 900, 20000};
+
+// PeSTO tables (zero for now)
+const int pesto_mg[7][64] = {};
+const int pesto_eg[7][64] = {};
+const int pesto_values[7] = {0, 100, 320, 330, 500, 900, 20000};
+
+// Global arrays for move ordering and history
+// Forward declarations to avoid premature definitions and duplicates
+struct TTEntry;
+extern TTEntry TT[]; // Actual definition appears later
+extern Move killers[MAX_PLY][KILLER_SLOTS];
+extern int history[2][64][64];
+extern Move countermoves[64][64];
+extern int continuation_history[2][6][64];
+extern int capture_history[2][7][64];
+
+// Forward declarations for PeSTO tables (defined later)
+extern const int pesto_mg[7][64];
+extern const int pesto_eg[7][64];
+extern const int pesto_values[];
+
+// Forward declarations for core functions
+std::string move_to_uci(const Move& m);
+bool is_valid_move(const Move& m);
+void generate_moves(Position& pos, std::vector<Move>& moves);
+void make_move(Position& pos, const Move& m, Undo& u, int& halfmove_clock);
+void unmake_move(Position& pos, const Move& m, const Undo& u, int& halfmove_clock);
+bool is_square_attacked(const Position& pos, int sq, int bySide);
+int evaluate(const Position& pos);
+int pvs_search(Position& pos, int depth, int alpha, int beta, int& halfmove_clock, std::vector<U64>& history, int ply, bool do_null, const Move& prev_move);
+Move search_root(Position& root, int depth, int time_ms);
+void uci_loop();
+
+// Forward declarations for helper functions
+int count_material(const Position& pos, int side);
+int count_mobility(const Position& pos, int side, int piece_type);
+int count_rooks_on_7th(const Position& pos, int side);
+int count_connected_rooks(const Position& pos, int side);
+int king_tropism(const Position& pos, int side);
+int evaluate_pawn_structure(const Position& pos, int side);
+int evaluate_king_safety(const Position& pos, int side);
+int see(const Position& pos, Move m);
+bool is_insufficient_material(const Position& pos);
+int evaluate_king_pawn_endgame(const Position& pos, int side);
+int evaluate_endgame(const Position& pos);
+int evaluate_tuned(const Position& pos);
+Move handle_edge_cases(Position& pos);
+bool validate_position(const Position& pos);
+
+// Forward declarations for logging
+enum LogLevel { LOG_INFO, LOG_WARNING, LOG_ERROR, LOG_DEBUG };
+void log(LogLevel level, const std::string& message);
+
+// Forward declarations for testing
+void run_perft_tests();
+void self_play_test(int games, int depth);
+void test_fixes();
+void verify_uci_protocol();
+
+// Forward declarations for initialization
+void init_magics();
+void init_zobrist();
+void init_move_tables();
+void init_search();
+
+// Global move tables
 U64 knight_moves[64];
 U64 king_moves[64];
 
@@ -262,135 +345,9 @@ void init_zobrist() {
     for (int i = 0; i <= 64; i++) zobristEp[i] = rng();
 }
 
-// Correcting misplaced comment and ensuring proper declaration of pst array
-// Tapered evaluation: separate midgame and endgame piece-square tables
-static const int pst_midgame[7][64] = {
-    /* EMPTY */ {0},
-    /* PAWN */ {
-         0,  0,  0,  0,  0,  0,  0,  0,
-        50, 50, 50, 50, 50, 50, 50, 50,
-        10, 10, 20, 30, 30, 20, 10, 10,
-         5,  5, 10, 25, 25, 10,  5,  5,
-         0,  0,  0, 20, 20,  0,  0,  0,
-         5, -5,-10,  0,  0,-10, -5,  5,
-         5, 10, 10,-20,-20, 10, 10,  5,
-         0,  0,  0,  0,  0,  0,  0,  0
-    },
-    /* KNIGHT */ {
-        -50,-40,-30,-30,-30,-30,-40,-50,
-        -40,-20,  0,  5,  5,  0,-20,-40,
-        -30,  5, 10, 15, 15, 10,  5,-30,
-        -30,  0, 15, 20,  20, 15,  0,-30,
-        -30,  5, 15, 20,  20, 15,  5,-30,
-        -30,  0, 10, 15,  15, 10,  0,-30,
-        -40,-20,  0,  0,  0,  0,-20,-40,
-        -50,-40,-30,-30,-30,-30,-40,-50
-    },
-    /* BISHOP */ {
-        -20,-10,-10,-10,-10,-10,-10,-20,
-        -10,  5,  0,  0,  0,  0,  5,-10,
-        -10, 10, 10, 10, 10, 10, 10,-10,
-        -10,  0, 10, 10, 10, 10,  0,-10,
-        -10,  5,  5, 10, 10,  5,  5,-10,
-        -10,  0,  5, 10, 10,  5,  0,-10,
-        -10,  0,  0,  0,  0,  0,  0,-10,
-        -20,-10,-10,-10,-10,-10,-10,-20
-    },
-    /* ROOK */ {
-         0,  0,  5, 10, 10,  5,  0,  0,
-        -5,  0,  0,  0,  0,  0,  0, -5,
-        -5,  0,  0,  0,  0,  0,  0, -5,
-        -5,  0,  0,  0,  0,  0,  0, -5,
-        -5,  0,  0,  0,  0,  0,  0, -5,
-        -5,  0,  0,  0,  0,  0,  0, -5,
-         5, 10, 10, 10, 10, 10, 10,  5,
-         0,  0,  0,  0,  0,  0,  0,  0
-    },
-    /* QUEEN */ {
-        -20,-10,-10, -5, -5,-10,-10,-20,
-        -10,  0,  5,  0,  0,  0,  0,-10,
-        -10,  5,  5,  5,  5,  5,  0,-10,
-         -5,  0,  5,  5,  5,  5,  0, -5,
-          0,  0,  5,  5,  5,  5,  0, -5,
-        -10,  0,  5,  5,  5,  5,  0,-10,
-        -10,  0,  0,  0,  0,  0,  0,-10,
-        -20,-10,-10, -5, -5,-10,-10,-20
-    },
-    /* KING */ {
-        -30,-40,-40,-50,-50,-40,-40,-30,
-        -30,-40,-40,-50,-50,-40,-40,-30,
-        -30,-40,-40,-50,-50,-40,-40,-30,
-        -30,-40,-40,-50,-50,-40,-40,-30,
-        -20,-30,-30,-40,-40,-30,-30,-20,
-        -10,-20,-20,-20,-20,-20,-20,-10,
-         20, 20,  0,  0,  0,  0, 20, 20,
-         20, 30, 10,  0,  0, 10, 30, 20
-    }
-};
-
-static const int pst_endgame[7][64] = {
-    /* EMPTY */ {0},
-    /* PAWN */ {
-         0,  0,  0,  0,  0,  0,  0,  0,
-        50, 50, 50, 50, 50, 50, 50, 50,
-        30, 30, 40, 50, 50, 40, 30, 30,
-        20, 20, 30, 40, 40, 30, 20, 20,
-        10, 10, 20, 30, 30, 20, 10, 10,
-        10, 10, 20, 30, 30, 20, 10, 10,
-        20, 20, 30, 40, 40, 30, 20, 20,
-        50, 50, 50, 50, 50, 50, 50, 50
-    },
-    /* KNIGHT */ {
-        -50,-40,-30,-30,-30,-30,-40,-50,
-        -40,-20,  0,  0,  0,  0,-20,-40,
-        -30,  5, 10, 15, 15, 10,  5,-30,
-        -30, 10, 15, 20, 20, 15, 10,-30,
-        -30, 10, 15, 20, 20, 15, 10,-30,
-        -30,  5, 10, 15, 15, 10,  5,-30,
-        -40,-20,  0,  5,  5,  0,-20,-40,
-        -50,-40,-30,-30,-30,-30,-40,-50
-    },
-    /* BISHOP */ {
-        -20,-10,-10,-10,-10,-10,-10,-20,
-        -10,  0,  0,  0,  0,  0,  0,-10,
-        -10,  0, 10, 10, 10, 10,  0,-10,
-        -10,  0, 10, 20, 20, 10,  0,-10,
-        -10,  0, 10, 20, 20, 10,  0,-10,
-        -10,  0, 10, 10, 10, 10,  0,-10,
-        -10,  0,  0,  0,  0,  0,  0,-10,
-        -20,-10,-10,-10,-10,-10,-10,-20
-    },
-    /* ROOK */ {
-         0,  0,  0,  5,  5,  0,  0,  0,
-         0,  0,  0,  5,  5,  0,  0,  0,
-         0,  0,  0,  5,  5,  0,  0,  0,
-         0,  0,  0,  5,  5,  0,  0,  0,
-         0,  0,  0,  5,  5,  0,  0,  0,
-         0,  0,  0,  5,  5,  0,  0,  0,
-         0,  0,  0,  5,  5,  0,  0,  0,
-         0,  0,  0,  0,  0,  0,  0,  0
-    },
-    /* QUEEN */ {
-        -20,-10,-10, -5, -5,-10,-10,-20,
-        -10,  0,  0,  0,  0,  0,  0,-10,
-        -10,  0,  0,  0,  0,  0,  0,-10,
-         -5,  0,  0,  0,  0,  0,  0, -5,
-         -5,  0,  0,  0,  0,  0,  0, -5,
-        -10,  0,  0,  0,  0,  0,  0,-10,
-        -10,  0,  0,  0,  0,  0,  0,-10,
-        -20,-10,-10, -5, -5,-10,-10,-20
-    },
-    /* KING */ {
-        -50,-40,-30,-20,-20,-30,-40,-50,
-        -30,-20,-10,  0,  0,-10,-20,-30,
-        -30,-10, 20, 30, 30, 20,-10,-30,
-        -30,-10, 30, 40, 40, 30,-10,-30,
-        -30,-10, 30, 40, 40, 30,-10,-30,
-        -30,-10, 20, 30, 30, 20,-10,-30,
-        -30,-30,  0,  0,  0,  0,-30,-30,
-        -50,-30,-30,-30,-30,-30,-30,-50
-    }
-};
+// [PHASE 1] FIX: Remove duplicate PST tables - keep only pesto_mg and pesto_eg
+// The pesto tables are already defined above (lines 1441-1555)
+// Delete the unused pst_midgame and pst_endgame arrays
 
 // ===============================
 // MOVE STRUCT, UNDO, AND POSITION STRUCTS
@@ -430,6 +387,13 @@ struct Position {
 static Position g_current_position; // will be initialized in main()
 static std::atomic<bool> g_stop_search(false);
 static Move g_tt_move = {0, 0, 0}; // Global TT move for move ordering
+
+// [PHASE 8] Prefetching helper for TT
+inline void prefetch_tt(U64 key) {
+    // Prefetch the TT entry into cache before we need it
+    // This reduces cache misses during search
+    _mm_prefetch((const char*)&TT[key & (TT_SIZE - 1)], _MM_HINT_T0);
+}
 
 // [PHASE 1] Root Move Structure for Iron Dome Legality
 struct RootMove {
@@ -472,9 +436,14 @@ void generate_root_moves(Position& pos, std::vector<RootMove>& root_moves) {
 // Global contempt value for draw avoidance
 static int g_contempt = 10; // 10cp contempt (adjustable)
 
-// [FIX] Time management globals
+// [PHASE 4] Time management globals
 static long long g_start_time = 0;
 static long long g_allocated_time = 0;
+static long long g_soft_time_limit = 0;
+static long long g_hard_time_limit = 0;
+static int g_move_stability = 0; // Track how stable the best move is
+static Move g_last_best_move = {0, 0, 0};
+
 
 /* ===============================
    UCI POSITION MANAGEMENT
@@ -702,7 +671,11 @@ bool is_square_attacked(const Position& pos, int sq, int bySide) {
 // To test whether the side that just moved ('mover') has left its king in check,
 // call this helper with the mover's side (the value saved BEFORE make_move).
 inline bool is_our_king_attacked_after_move(const Position& pos, int mover_side) {
-    int kingSq = lsb(pos.pieces[mover_side][KING]);
+    // [PHASE 1] FIX: Check if king exists before using lsb
+    U64 king_bb = pos.pieces[mover_side][KING];
+    if (king_bb == 0) return false; // No king means no check (shouldn't happen in valid positions)
+    
+    int kingSq = lsb(king_bb);
     return is_square_attacked(pos, kingSq, pos.side); // pos.side is now the opponent
 }
 
@@ -1151,556 +1124,248 @@ void test_perft_all() {
 // Forward declaration for parse_uci_move
 Move parse_uci_move(const Position& pos, const std::string& uci);
 
-// Test function to verify the fixes
-void test_fixes() {
-    std::cout << "Testing fixes..." << std::endl;
-    
-    // Test 1: Parse UCI move with promotion
-    Position test_pos = start_position();
-    Move m1 = parse_uci_move(test_pos, "a7a8q");
-    if (m1.from == 48 && m1.to == 56 && m1.promo == QUEEN) {
-        std::cout << "Promotion parsing works correctly" << std::endl;
-    } else {
-        std::cout << "Promotion parsing failed" << std::endl;
+// [PHASE 9] Perft verification with detailed output
+void perft_test_detailed(Position& pos, int depth, int& halfmove_clock, std::vector<U64>& history, std::map<std::string, uint64_t>& move_counts) {
+    if (depth == 0) {
+        return;
     }
     
-    // Test 2: Parse invalid moves
-    Move m2 = parse_uci_move(test_pos, "invalid");
-    if (m2.from == 0 && m2.to == 0 && m2.promo == 0) {
-        std::cout << "Invalid move parsing works correctly" << std::endl;
-    } else {
-        std::cout << "Invalid move parsing failed" << std::endl;
-    }
+    std::vector<Move> moves;
+    generate_moves(pos, moves);
     
-    // Test 3: Basic move parsing
-    Move m3 = parse_uci_move(test_pos, "e2e4");
-    if (m3.from == 52 && m3.to == 36 && m3.promo == 0) {
-        std::cout << "Basic move parsing works correctly" << std::endl;
-    } else {
-        std::cout << "Basic move parsing failed" << std::endl;
-    }
-    
-    std::cout << "Fix testing complete." << std::endl;
-}
-
-/* ===============================
-   EVALUATION
-================================ */
-
-static const int pieceValue[7] = {
-    0, 100, 320, 330, 500, 900, 20000
-};
-
-// Helper function to count material for phase calculation
-int count_material(const Position& pos, int side) {
-    int material = 0;
-    for (int p = 1; p <= 6; p++) {
-        U64 bb = pos.pieces[side][p];
-        while (bb) {
-            int sq = poplsb(bb);
-            if (sq >= 0) {
-                material += pieceValue[p];
-            }
-        }
-    }
-    return material;
-}
-
-// Helper function to count mobility (legal moves) for a piece
-int count_mobility(const Position& pos, int side, int piece_type) {
-    int mobility = 0;
-    U64 pieces = pos.pieces[side][piece_type];
-    U64 own = pos.occ[side];
-    U64 all = pos.all;
-    
-    while (pieces) {
-        int sq = poplsb(pieces);
+    for (const auto& m : moves) {
+        Undo u;
+        int hc = halfmove_clock;
+        int us = pos.side;
         
-        switch (piece_type) {
-            case KNIGHT: {
-                U64 moves = knight_moves[sq] & ~own;
-                while (moves) {
-                    mobility++;
-                    moves &= moves - 1;
-                }
-                break;
-            }
-            case BISHOP: {
-                U64 moves = bishop_attacks(sq, all) & ~own;
-                while (moves) {
-                    mobility++;
-                    moves &= moves - 1;
-                }
-                break;
-            }
-            case ROOK: {
-                U64 moves = rook_attacks(sq, all) & ~own;
-                while (moves) {
-                    mobility++;
-                    moves &= moves - 1;
-                }
-                break;
-            }
-            case QUEEN: {
-                U64 moves = (rook_attacks(sq, all) | bishop_attacks(sq, all)) & ~own;
-                while (moves) {
-                    mobility++;
-                    moves &= moves - 1;
-                }
-                break;
-            }
-            case KING: {
-                U64 moves = king_moves[sq] & ~own;
-                while (moves) {
-                    mobility++;
-                    moves &= moves - 1;
-                }
-                break;
-            }
-        }
-    }
-    return mobility;
-}
-
-// Helper function to evaluate pawn structure
-int evaluate_pawn_structure(const Position& pos, int side) {
-    int score = 0;
-    U64 pawns = pos.pieces[side][PAWN];
-    U64 all = pos.all;
-    
-    // Files for pawn structure analysis
-    constexpr U64 fileA = 0x0101010101010101ULL;
-    constexpr U64 fileB = 0x0202020202020202ULL;
-    constexpr U64 fileC = 0x0404040404040404ULL;
-    constexpr U64 fileD = 0x0808080808080808ULL;
-    constexpr U64 fileE = 0x1010101010101010ULL;
-    constexpr U64 fileF = 0x2020202020202020ULL;
-    constexpr U64 fileG = 0x4040404040404040ULL;
-    constexpr U64 fileH = 0x8080808080808080ULL;
-    
-    U64 files[8] = { fileA, fileB, fileC, fileD, fileE, fileF, fileG, fileH };
-    
-    // Check each file for pawn structure issues
-    for (int f = 0; f < 8; f++) {
-        U64 file_pawns = pawns & files[f];
-        int pawn_count = 0;
-        int lowest_rank = 8;
-        int highest_rank = -1;
+        make_move(pos, m, u, hc);
         
-        // Count pawns and find their positions
-        U64 temp = file_pawns;
-        while (temp) {
-            int sq = poplsb(temp);
-            int rank = sq / 8;
-            pawn_count++;
-            if (rank < lowest_rank) lowest_rank = rank;
-            if (rank > highest_rank) highest_rank = rank;
-        }
-        
-        // Doubled pawns penalty
-        if (pawn_count > 1) {
-            score -= 20 * (pawn_count - 1);
-        }
-        
-        // Isolated pawns penalty
-        bool isolated = true;
-        if (f > 0 && (pawns & files[f-1])) isolated = false;
-        if (f < 7 && (pawns & files[f+1])) isolated = false;
-        
-        if (isolated && pawn_count > 0) {
-            score -= 25;
-        }
-        
-        // Passed pawns bonus (improved)
-        if (pawn_count > 0) {
-            bool passed = true;
-            U64 forward_file = files[f];
-            if (side == WHITE) {
-                // Check files f-1, f, f+1 for enemy pawns ahead
-                for (int check_f = std::max(0, f-1); check_f <= std::min(7, f+1); check_f++) {
-                    U64 enemy_pawns_ahead = pos.pieces[side^1][PAWN] & files[check_f];
-                    // Only check ranks ahead of our pawn
-                    for (int r = highest_rank + 1; r < 8; r++) {
-                        if (enemy_pawns_ahead & bit(r * 8 + check_f)) {
-                            passed = false;
-                            break;
-                        }
-                    }
-                    if (!passed) break;
-                }
+        // Check legality
+        if (!is_our_king_attacked_after_move(pos, us)) {
+            std::string move_str = move_to_uci(m);
+            
+            if (depth == 1) {
+                move_counts[move_str]++;
             } else {
-                // Black pawns
-                for (int check_f = std::max(0, f-1); check_f <= std::min(7, f+1); check_f++) {
-                    U64 enemy_pawns_ahead = pos.pieces[side^1][PAWN] & files[check_f];
-                    // Only check ranks ahead of our pawn (lower ranks for black)
-                    for (int r = 0; r < lowest_rank; r++) {
-                        if (enemy_pawns_ahead & bit(r * 8 + check_f)) {
-                            passed = false;
-                            break;
-                        }
-                    }
-                    if (!passed) break;
-                }
+                history.push_back(hash_position(pos));
+                perft_test_detailed(pos, depth - 1, hc, history, move_counts);
+                history.pop_back();
+            }
+        }
+        
+        unmake_move(pos, m, u, halfmove_clock);
+    }
+}
+
+// [PHASE 9] Run perft tests and verify results
+void run_perft_tests() {
+    std::cout << "\n=== PERFT VERIFICATION ===" << std::endl;
+    
+    struct PerftTest {
+        std::string name;
+        std::string fen;
+        int depth;
+        uint64_t expected;
+    };
+    
+    std::vector<PerftTest> tests = {
+        {"Startpos d1", "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", 1, 20},
+        {"Startpos d2", "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", 2, 400},
+        {"Startpos d3", "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", 3, 8902},
+        {"KiwiPete d1", "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1", 1, 48},
+        {"KiwiPete d2", "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1", 2, 2039},
+    };
+    
+    for (const auto& test : tests) {
+        Position pos = fen_to_position(test.fen);
+        int halfmove_clock = 0;
+        std::vector<U64> history = {hash_position(pos)};
+        
+        auto start = std::chrono::high_resolution_clock::now();
+        uint64_t nodes = perft(pos, test.depth, halfmove_clock, history);
+        auto end = std::chrono::high_resolution_clock::now();
+        
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+        
+        bool passed = (nodes == test.expected);
+        std::cout << test.name << ": " << nodes << " / " << test.expected
+                  << (passed ? " ✓" : " ✗") << " (" << duration << "ms)" << std::endl;
+        
+        if (!passed && test.depth <= 3) {
+            // Show detailed breakdown for failed tests
+            std::cout << "  Detailed breakdown:" << std::endl;
+            std::map<std::string, uint64_t> move_counts;
+            perft_test_detailed(pos, test.depth, halfmove_clock, history, move_counts);
+            for (const auto& [move, count] : move_counts) {
+                std::cout << "    " << move << ": " << count << std::endl;
+            }
+        }
+    }
+    
+    std::cout << "=== PERFT VERIFICATION COMPLETE ===\n" << std::endl;
+}
+
+// [PHASE 9] Self-play testing function
+void self_play_test(int games, int depth) {
+    std::cout << "\n=== SELF-PLAY TESTING ===" << std::endl;
+    std::cout << "Running " << games << " games at depth " << depth << std::endl;
+    
+    int white_wins = 0, black_wins = 0, draws = 0;
+    
+    for (int g = 0; g < games; g++) {
+        Position pos = start_position();
+        std::vector<U64> game_history;
+        int halfmove_clock = 0;
+        int move_count = 0;
+        
+        while (move_count < 200) { // Max 200 moves per game
+            // Check for draw conditions
+            if (is_fifty_moves(halfmove_clock) || is_threefold(game_history, hash_position(pos))) {
+                draws++;
+                break;
             }
             
-            if (passed) {
-                // Bonus based on rank - more sophisticated scaling
-                int rank_bonus = 0;
-                if (side == WHITE) {
-                    // White passed pawn bonus increases dramatically as it advances
-                    if (highest_rank >= 5) rank_bonus = 50; // 6th rank
-                    else if (highest_rank >= 4) rank_bonus = 30; // 5th rank
-                    else if (highest_rank >= 3) rank_bonus = 20; // 4th rank
-                    else if (highest_rank >= 2) rank_bonus = 10; // 3rd rank
+            // Search for current player
+            g_stop_search.store(false);
+            g_nodes_searched = 0;
+            g_allocated_time = 100; // 100ms per move
+            g_start_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+            
+            // Generate root moves
+            std::vector<RootMove> root_moves;
+            generate_root_moves(pos, root_moves);
+            
+            if (root_moves.empty()) {
+                // Checkmate
+                if (pos.side == WHITE) {
+                    black_wins++;
                 } else {
-                    // Black passed pawn bonus
-                    if (lowest_rank <= 2) rank_bonus = 50; // 7th rank (from black's perspective)
-                    else if (lowest_rank <= 3) rank_bonus = 30; // 6th rank
-                    else if (lowest_rank <= 4) rank_bonus = 20; // 5th rank
-                    else if (lowest_rank <= 5) rank_bonus = 10; // 4th rank
+                    white_wins++;
                 }
-                score += rank_bonus;
+                break;
             }
+            
+            // Simple move selection (first legal move for speed)
+            Move best_move = root_moves[0].move;
+            
+            // Make the move
+            Undo u;
+            make_move(pos, best_move, u, halfmove_clock);
+            game_history.push_back(hash_position(pos));
+            
+            move_count++;
+        }
+        
+        if (move_count >= 200) {
+            draws++;
         }
     }
     
-    return score;
+    std::cout << "Results: White " << white_wins << " - Black " << black_wins << " - Draws " << draws << std::endl;
+    std::cout << "=== SELF-PLAY TESTING COMPLETE ===\n" << std::endl;
 }
 
-// Helper function to evaluate king safety
-int evaluate_king_safety(const Position& pos, int side) {
-    int score = 0;
-    int king_sq = lsb(pos.pieces[side][KING]);
-    int king_rank = king_sq / 8;
-    int king_file = king_sq % 8;
-    
-    // King tropism - enemy pieces near our king
-    U64 king_area = 0;
-    // Create a 3x3 area around the king
-    for (int r = std::max(0, king_rank - 1); r <= std::min(7, king_rank + 1); r++) {
-        for (int f = std::max(0, king_file - 1); f <= std::min(7, king_file + 1); f++) {
-            king_area |= bit(r * 8 + f);
-        }
-    }
-    
-    // Penalize enemy pieces in king area
-    int enemy_king_area_count = 0;
-    for (int p = KNIGHT; p <= QUEEN; p++) {
-        U64 enemy_pieces = pos.pieces[side^1][p] & king_area;
-        while (enemy_pieces) {
-            enemy_king_area_count++;
-            enemy_pieces &= enemy_pieces - 1;
-        }
-    }
-    score -= enemy_king_area_count * 15;
-    
-    // Pawn shield evaluation (simplified)
-    if (side == WHITE) {
-        // Check for pawns in front of king
-        int shield_score = 0;
-        if (king_rank < 7) { // Prevent out-of-bounds access
-            for (int f = std::max(0, king_file - 1); f <= std::min(7, king_file + 1); f++) {
-                if (pos.pieces[WHITE][PAWN] & bit((king_rank + 1) * 8 + f)) {
-                    shield_score += 10;
-                }
-            }
-        }
-        score += shield_score;
-    } else {
-        // Black pawns
-        int shield_score = 0;
-        if (king_rank > 0) { // Prevent out-of-bounds access
-            for (int f = std::max(0, king_file - 1); f <= std::min(7, king_file + 1); f++) {
-                if (pos.pieces[BLACK][PAWN] & bit((king_rank - 1) * 8 + f)) {
-                    shield_score += 10;
-                }
-            }
-        }
-        score += shield_score;
-    }
-    
-    // Open files near king penalty
-    if (king_file > 0) {
-        U64 file = 0x0101010101010101ULL << (king_file - 1);
-        if (!(pos.pieces[side][PAWN] & file)) {
-            score -= 5; // Open file penalty
-        }
-    }
-    if (king_file < 7) {
-        U64 file = 0x0101010101010101ULL << (king_file + 1);
-        if (!(pos.pieces[side][PAWN] & file)) {
-            score -= 5; // Open file penalty
-        }
-    }
-    
-    return score;
-}
-
-// [PHASE 4] PeSTO Piece-Square Tables (Midgame and Endgame)
-// These tables provide positional understanding without training data
-static const int pesto_mg[7][64] = {
-    {0}, // Empty
-    // Pawn
-    { 0,  0,  0,  0,  0,  0,  0,  0,
-     50, 50, 50, 50, 50, 50, 50, 50,
-     10, 10, 20, 30, 30, 20, 10, 10,
-      5,  5, 10, 25, 25, 10,  5,  5,
-      0,  0,  0, 20, 20,  0,  0,  0,
-      5, -5,-10,  0,  0,-10, -5,  5,
-      5, 10, 10,-20,-20, 10, 10,  5,
-      0,  0,  0,  0,  0,  0,  0,  0},
-    // Knight
-    {-50,-40,-30,-30,-30,-30,-40,-50,
-     -40,-20,  0,  5,  5,  0,-20,-40,
-     -30,  5, 10, 15, 15, 10,  5,-30,
-     -30,  0, 15, 20, 20, 15,  0,-30,
-     -30,  5, 15, 20, 20, 15,  5,-30,
-     -30,  0, 10, 15, 15, 10,  0,-30,
-     -40,-20,  0,  0,  0,  0,-20,-40,
-     -50,-40,-30,-30,-30,-30,-40,-50},
-    // Bishop
-    {-20,-10,-10,-10,-10,-10,-10,-20,
-     -10,  5,  0,  0,  0,  0,  5,-10,
-     -10, 10, 10, 10, 10, 10, 10,-10,
-     -10,  0, 10, 10, 10, 10,  0,-10,
-     -10,  5,  5, 10, 10,  5,  5,-10,
-     -10,  0,  5, 10, 10,  5,  0,-10,
-     -10,  0,  0,  0,  0,  0,  0,-10,
-     -20,-10,-10,-10,-10,-10,-10,-20},
-    // Rook
-    { 0,  0,  0,  5,  5,  0,  0,  0,
-     -5,  0,  0,  0,  0,  0,  0, -5,
-     -5,  0,  0,  0,  0,  0,  0, -5,
-     -5,  0,  0,  0,  0,  0,  0, -5,
-     -5,  0,  0,  0,  0,  0,  0, -5,
-     -5,  0,  0,  0,  0,  0,  0, -5,
-      5, 10, 10, 10, 10, 10, 10,  5,
-      0,  0,  0,  0,  0,  0,  0,  0},
-    // Queen
-    {-20,-10,-10, -5, -5,-10,-10,-20,
-     -10,  0,  5,  0,  0,  0,  0,-10,
-     -10,  5,  5,  5,  5,  5,  0,-10,
-      -5,  0,  5,  5,  5,  5,  0, -5,
-       0,  0,  5,  5,  5,  5,  0, -5,
-     -10,  0,  5,  5,  5,  5,  0,-10,
-     -10,  0,  0,  0,  0,  0,  0,-10,
-     -20,-10,-10, -5, -5,-10,-10,-20},
-    // King
-    {-30,-40,-40,-50,-50,-40,-40,-30,
-     -30,-40,-40,-50,-50,-40,-40,-30,
-     -30,-40,-40,-50,-50,-40,-40,-30,
-     -30,-40,-40,-50,-50,-40,-40,-30,
-     -20,-30,-30,-40,-40,-30,-30,-20,
-     -10,-20,-20,-20,-20,-20,-20,-10,
-      20, 20,  0,  0,  0,  0, 20, 20,
-      20, 30, 10,  0,  0, 10, 30, 20}
+// [PHASE 9] Parameter tuning structure
+struct TuningParameters {
+    int king_safety_weight = 15;
+    int passed_pawn_weight = 10;
+    int bishop_pair_bonus = 50;
+    int mobility_weight = 2;
+    int rook_7th_weight = 50;
+    int connected_rooks_weight = 25;
+    int king_tropism_weight = 15;
 };
 
-static const int pesto_eg[7][64] = {
-    {0}, // Empty
-    // Pawn
-    { 0,  0,  0,  0,  0,  0,  0,  0,
-     50, 50, 50, 50, 50, 50, 50, 50,
-     30, 30, 40, 50, 50, 40, 30, 30,
-     20, 20, 30, 40, 40, 30, 20, 20,
-     10, 10, 20, 30, 30, 20, 10, 10,
-     10, 10, 20, 30, 30, 20, 10, 10,
-     20, 20, 30, 40, 40, 30, 20, 20,
-      0,  0,  0,  0,  0,  0,  0,  0},
-    // Knight
-    {-50,-40,-30,-30,-30,-30,-40,-50,
-     -40,-20,  0,  0,  0,  0,-20,-40,
-     -30,  0, 10, 15, 15, 10,  0,-30,
-     -30,  5, 15, 20, 20, 15,  5,-30,
-     -30,  5, 15, 20, 20, 15,  5,-30,
-     -30,  0, 10, 15, 15, 10,  0,-30,
-     -40,-20,  0,  5,  5,  0,-20,-40,
-     -50,-40,-30,-30,-30,-30,-40,-50},
-    // Bishop
-    {-20,-10,-10,-10,-10,-10,-10,-20,
-     -10,  0,  0,  0,  0,  0,  0,-10,
-     -10,  0,  5, 10, 10,  5,  0,-10,
-     -10,  5,  5, 10, 10,  5,  5,-10,
-     -10,  0, 10, 10, 10, 10,  0,-10,
-     -10, 10, 10, 10, 10, 10, 10,-10,
-     -10,  5,  0,  0,  0,  0,  5,-10,
-     -20,-10,-10,-10,-10,-10,-10,-20},
-    // Rook
-    { 0,  0,  0,  0,  0,  0,  0,  0,
-      0,  0,  0,  0,  0,  0,  0,  0,
-      0,  0,  0,  0,  0,  0,  0,  0,
-      0,  0,  0,  0,  0,  0,  0,  0,
-      0,  0,  0,  0,  0,  0,  0,  0,
-      0,  0,  0,  0,  0,  0,  0,  0,
-      0,  0,  0,  0,  0,  0,  0,  0,
-      0,  0,  0,  0,  0,  0,  0,  0},
-    // Queen
-    {-10, -5, -5,  0,  0, -5, -5,-10,
-      -5,  0,  0,  0,  0,  0,  0, -5,
-      -5,  0,  5,  5,  5,  5,  0, -5,
-       0,  0,  5,  5,  5,  5,  0, -5,
-       0,  0,  5,  5,  5,  5,  0, -5,
-      -5,  0,  5,  5,  5,  5,  0, -5,
-      -5,  0,  0,  0,  0,  0,  0, -5,
-     -10, -5, -5,  0,  0, -5, -5,-10},
-    // King
-    {-50,-40,-30,-20,-20,-30,-40,-50,
-     -30,-20,-10,  0,  0,-10,-20,-30,
-     -30,-10, 20, 30, 30, 20,-10,-30,
-     -30,-10, 30, 40, 40, 30,-10,-30,
-     -30,-10, 30, 40, 40, 30,-10,-30,
-     -30,-10, 20, 30, 30, 20,-10,-30,
-     -30,-30,  0,  0,  0,  0,-30,-30,
-     -50,-30,-30,-30,-30,-30,-30,-50}
-};
+static TuningParameters g_tuning_params;
 
-// PeSTO piece values (match the tables)
-static const int pesto_values[] = {0, 100, 320, 330, 500, 900, 20000};
-
-int evaluate(const Position& pos) {
+// [PHASE 9] Apply tuning parameters to evaluation
+int evaluate_tuned(const Position& pos) {
     if (g_stop_search.load()) return 0;
     
     int score = 0;
     
-    // Calculate game phase (0 = endgame, 256 = midgame)
-    int phase = 256;
-    int non_pawn_material = 0;
+    // Material
+    int white_material = count_material(pos, WHITE);
+    int black_material = count_material(pos, BLACK);
+    score += white_material - black_material;
     
-    for (int s = 0; s < 2; s++) {
-        for (int p = KNIGHT; p <= QUEEN; p++) {
-            non_pawn_material += (int)__popcnt64(pos.pieces[s][p]) * pesto_values[p];
-        }
+    // Mobility
+    int white_mobility = 0, black_mobility = 0;
+    for (int p = KNIGHT; p <= KING; p++) {
+        white_mobility += count_mobility(pos, WHITE, p);
+        black_mobility += count_mobility(pos, BLACK, p);
     }
+    score += (white_mobility - black_mobility) * g_tuning_params.mobility_weight;
     
-    // Phase calculation: reduce based on material
-    phase = std::max(0, phase - (non_pawn_material / 64));
+    // Rook on 7th rank
+    int white_rook_7th = count_rooks_on_7th(pos, WHITE);
+    int black_rook_7th = count_rooks_on_7th(pos, BLACK);
+    score += (white_rook_7th - black_rook_7th) * g_tuning_params.rook_7th_weight;
     
-    // PeSTO evaluation
+    // Connected rooks
+    int white_connected = count_connected_rooks(pos, WHITE);
+    int black_connected = count_connected_rooks(pos, BLACK);
+    score += (white_connected - black_connected) * g_tuning_params.connected_rooks_weight;
+    
+    // Pawn structure
+    score += evaluate_pawn_structure(pos, WHITE) * g_tuning_params.passed_pawn_weight / 10;
+    score -= evaluate_pawn_structure(pos, BLACK) * g_tuning_params.passed_pawn_weight / 10;
+    
+    // King tropism
+    score += king_tropism(pos, WHITE) * g_tuning_params.king_tropism_weight / 15;
+    score -= king_tropism(pos, BLACK) * g_tuning_params.king_tropism_weight / 15;
+    
+    // King safety
+    score += evaluate_king_safety(pos, WHITE) * g_tuning_params.king_safety_weight / 15;
+    score -= evaluate_king_safety(pos, BLACK) * g_tuning_params.king_safety_weight / 15;
+    
+    // PeSTO tables
+    int mg_score = 0, eg_score = 0;
     for (int s = 0; s < 2; s++) {
-        int sign = (s == WHITE) ? 1 : -1;
-        
-        for (int p = PAWN; p <= KING; p++) {
+        for (int p = 1; p <= 6; p++) {
             U64 bb = pos.pieces[s][p];
             while (bb) {
                 int sq = poplsb(bb);
-                int psq = (s == WHITE) ? sq : (sq ^ 56);
-                
-                int mg = pesto_values[p] + pesto_mg[p][psq];
-                int eg = pesto_values[p] + pesto_eg[p][psq];
-                
-                // Tapered evaluation
-                int value = (mg * phase + eg * (256 - phase)) / 256;
-                score += sign * value;
-            }
-        }
-    }
-    
-    // Mobility (simplified)
-    int mobility = 0;
-    for (int s = 0; s < 2; s++) {
-        int sign = (s == WHITE) ? 1 : -1;
-        U64 all = pos.all;
-        
-        // Knights
-        U64 knights = pos.pieces[s][KNIGHT];
-        while (knights) {
-            int sq = poplsb(knights);
-            U64 attacks = knight_moves[sq] & ~pos.occ[s];
-            mobility += sign * (int)__popcnt64(attacks) * 2;
-        }
-        
-        // Bishops
-        U64 bishops = pos.pieces[s][BISHOP];
-        while (bishops) {
-            int sq = poplsb(bishops);
-            U64 attacks = bishop_attacks(sq, all) & ~pos.occ[s];
-            mobility += sign * (int)__popcnt64(attacks) * 2;
-        }
-        
-        // Rooks
-        U64 rooks = pos.pieces[s][ROOK];
-        while (rooks) {
-            int sq = poplsb(rooks);
-            U64 attacks = rook_attacks(sq, all) & ~pos.occ[s];
-            mobility += sign * (int)__popcnt64(attacks) * 1;
-        }
-    }
-    score += mobility;
-    
-    // Pawn structure (simplified)
-    for (int s = 0; s < 2; s++) {
-        int sign = (s == WHITE) ? 1 : -1;
-        U64 pawns = pos.pieces[s][PAWN];
-        
-        // Doubled pawns penalty
-        for (int f = 0; f < 8; f++) {
-            U64 file_pawns = pawns & (0x0101010101010101ULL << f);
-            int count = (int)__popcnt64(file_pawns);
-            if (count > 1) score -= sign * 20 * (count - 1);
-        }
-        
-        // Passed pawns bonus
-        U64 enemy_pawns = pos.pieces[s^1][PAWN];
-        while (pawns) {
-            int sq = poplsb(pawns);
-            int rank = sq / 8;
-            int file = sq % 8;
-            
-            bool passed = true;
-            for (int f = std::max(0, file-1); f <= std::min(7, file+1); f++) {
-                U64 forward = (s == WHITE) ?
-                    ((1ULL << (rank+1)) - 1) << (f*8) :
-                    ((1ULL << (8-rank)) - 1) << (f*8);
-                if (enemy_pawns & forward) {
-                    passed = false;
-                    break;
+                int table_sq = (s == WHITE) ? sq : (63 - sq);
+                if (s == WHITE) {
+                    mg_score += pesto_mg[p][table_sq];
+                    eg_score += pesto_eg[p][table_sq];
+                } else {
+                    mg_score -= pesto_mg[p][table_sq];
+                    eg_score -= pesto_eg[p][table_sq];
                 }
             }
-            
-            if (passed) {
-                int bonus = (s == WHITE) ? (rank * 10) : ((7-rank) * 10);
-                score += sign * bonus;
-            }
         }
     }
     
-    // King safety (simplified)
-    for (int s = 0; s < 2; s++) {
-        int sign = (s == WHITE) ? 1 : -1;
-        U64 king = pos.pieces[s][KING];
-        if (king) {
-            int sq = lsb(king);
-            int file = sq % 8;
-            
-            // Penalty for open files near king
-            U64 file_mask = 0x0101010101010101ULL << file;
-            if (!(pos.pieces[s][PAWN] & file_mask)) {
-                score -= sign * 15;
-            }
-            
-            // Penalty for enemy pieces near king
-            U64 enemy = pos.pieces[s^1][QUEEN] | pos.pieces[s^1][ROOK];
-            U64 king_zone = 0;
-            int r = sq / 8, f = sq % 8;
-            for (int dr = -2; dr <= 2; dr++) {
-                for (int df = -2; df <= 2; df++) {
-                    int nr = r + dr, nf = f + df;
-                    if (nr >= 0 && nr < 8 && nf >= 0 && nf < 8) {
-                        king_zone |= bit(nr * 8 + nf);
-                    }
-                }
-            }
-            if (enemy & king_zone) {
-                score -= sign * 10 * (int)__popcnt64(enemy & king_zone);
-            }
-        }
-    }
+    // Phase calculation
+    int phase = 0;
+    int total_phase = 24;
+    int white_knights = __popcnt64(pos.pieces[WHITE][KNIGHT]);
+    int black_knights = __popcnt64(pos.pieces[BLACK][KNIGHT]);
+    int white_bishops = __popcnt64(pos.pieces[WHITE][BISHOP]);
+    int black_bishops = __popcnt64(pos.pieces[BLACK][BISHOP]);
+    int white_rooks = __popcnt64(pos.pieces[WHITE][ROOK]);
+    int black_rooks = __popcnt64(pos.pieces[BLACK][ROOK]);
+    int white_queens = __popcnt64(pos.pieces[WHITE][QUEEN]);
+    int black_queens = __popcnt64(pos.pieces[BLACK][QUEEN]);
+    
+    phase += (white_knights + black_knights) * 1;
+    phase += (white_bishops + black_bishops) * 1;
+    phase += (white_rooks + black_rooks) * 2;
+    phase += (white_queens + black_queens) * 4;
+    
+    if (phase > total_phase) phase = total_phase;
+    
+    int positional = ((mg_score * (total_phase - phase)) + (eg_score * phase)) / total_phase;
+    score += positional;
     
     // Bishop pair bonus
-    if ((int)__popcnt64(pos.pieces[WHITE][BISHOP]) >= 2) score += 50;
-    if ((int)__popcnt64(pos.pieces[BLACK][BISHOP]) >= 2) score -= 50;
+    if ((int)__popcnt64(pos.pieces[WHITE][BISHOP]) >= 2) score += 75;
+    if ((int)__popcnt64(pos.pieces[BLACK][BISHOP]) >= 2) score -= 75;
     
-    // Contempt (encourage winning, discourage draws)
+    // Contempt
     score += (pos.side == WHITE) ? g_contempt : -g_contempt;
     
     // Return from side to move perspective
@@ -1732,8 +1397,9 @@ void init_eval_params() {
     for (int p = 0; p < 7; p++) {
         g_eval_params.pieceValue[p] = pieceValue[p];
         for (int sq = 0; sq < 64; sq++) {
-            g_eval_params.pst_midgame[p][sq] = pst_midgame[p][sq];
-            g_eval_params.pst_endgame[p][sq] = pst_endgame[p][sq];
+            // Use pesto tables instead of pst_midgame/pst_endgame
+            g_eval_params.pst_midgame[p][sq] = pesto_mg[p][sq];
+            g_eval_params.pst_endgame[p][sq] = pesto_eg[p][sq];
         }
     }
     g_eval_params.king_safety_weight = 15; // Scale factor for king safety
@@ -1743,153 +1409,11 @@ void init_eval_params() {
     g_eval_params.mobility_weight = 1;
 }
 
-// Tuned evaluation function using parameters
-int evaluate_tuned(const Position& pos) {
-    if (g_stop_search.load()) return 0;
-    int score = 0;
-    
-    // Calculate game phase (0 = endgame, 256 = midgame)
-    int white_material = count_material(pos, WHITE);
-    int black_material = count_material(pos, BLACK);
-    
-    // Phase calculation based on material
-    int phase = 256;
-    phase -= (white_material + black_material) / 64; // Simplified phase calculation
-    
-    for (int s = 0; s < 2; s++) {
-        int sign = (s == WHITE) ? 1 : -1;
-        
-        // Material and PST evaluation with tuned parameters
-        for (int p = 1; p <= 6; p++) {
-            U64 bb = pos.pieces[s][p];
-            while (bb) {
-                int sq = poplsb(bb);
-                int psq = (s == WHITE) ? sq : (sq ^ 56);
-                
-                // Tapered evaluation: interpolate between midgame and endgame
-                int mg_value = g_eval_params.pieceValue[p] + g_eval_params.pst_midgame[p][psq];
-                int eg_value = g_eval_params.pieceValue[p] + g_eval_params.pst_endgame[p][psq];
-                
-                // Interpolate based on phase
-                int value = (mg_value * phase + eg_value * (256 - phase)) / 256;
-                
-                score += sign * value;
-            }
-        }
-        
-        // Mobility evaluation with tuning
-        int mobility = 0;
-        mobility += count_mobility(pos, s, KNIGHT) * 5 * g_eval_params.mobility_weight;   // Knights value mobility
-        mobility += count_mobility(pos, s, BISHOP) * 4 * g_eval_params.mobility_weight;   // Bishops value mobility
-        mobility += count_mobility(pos, s, ROOK) * 2 * g_eval_params.mobility_weight;     // Rooks value mobility
-        mobility += count_mobility(pos, s, QUEEN) * 1 * g_eval_params.mobility_weight;    // Queens already strong
-        score += sign * mobility;
-        
-        // Pawn structure evaluation with tuning
-        int pawn_structure = evaluate_pawn_structure(pos, s) * g_eval_params.pawn_structure_weight;
-        score += sign * pawn_structure;
-        
-        // King safety evaluation with tuning
-        int king_safety = evaluate_king_safety(pos, s) * g_eval_params.king_safety_weight;
-        score += sign * king_safety;
-    }
-    
-    // Add contempt - encourages winning, discourages draws
-    score += (pos.side == WHITE) ? g_contempt : -g_contempt;
-    
-    // Bishop pair bonus with tuning
-    if ((int)__popcnt64(pos.pieces[WHITE][BISHOP]) >= 2) score += g_eval_params.bishop_pair_bonus;
-    if ((int)__popcnt64(pos.pieces[BLACK][BISHOP]) >= 2) score -= g_eval_params.bishop_pair_bonus;
-    
-    // Rook on open file bonus
-    for (int s = 0; s < 2; s++) {
-        int sign = (s == WHITE) ? 1 : -1;
-        U64 rooks = pos.pieces[s][ROOK];
-        while (rooks) {
-            int sq = poplsb(rooks);
-            int file = sq % 8;
-            U64 file_mask = 0x0101010101010101ULL << file;
-            
-            // Open file (no pawns)
-            if (!(pos.pieces[WHITE][PAWN] & file_mask) && !(pos.pieces[BLACK][PAWN] & file_mask)) {
-                score += sign * 20;
-            }
-            // Semi-open file (no friendly pawns)
-            else if (!(pos.pieces[s][PAWN] & file_mask)) {
-                score += sign * 10;
-            }
-        }
-    }
-    
-    // Knight outpost bonus
-    for (int s = 0; s < 2; s++) {
-        int sign = (s == WHITE) ? 1 : -1;
-        U64 knights = pos.pieces[s][KNIGHT];
-        while (knights) {
-            int sq = poplsb(knights);
-            int rank = sq / 8;
-            int file = sq % 8;
-            
-            // Outpost: advanced, protected by pawn, can't be attacked by enemy pawns
-            bool is_outpost = false;
-            if (s == WHITE && rank >= 4 && rank <= 6) {
-                // Check if protected by pawn
-                if ((file > 0 && (pos.pieces[WHITE][PAWN] & bit(sq - 9))) ||
-                    (file < 7 && (pos.pieces[WHITE][PAWN] & bit(sq - 7)))) {
-                    // Check if enemy pawns can't attack
-                    bool can_be_attacked = false;
-                    for (int r = rank - 1; r >= 0; r--) {
-                        if ((file > 0 && (pos.pieces[BLACK][PAWN] & bit(r * 8 + file - 1))) ||
-                            (file < 7 && (pos.pieces[BLACK][PAWN] & bit(r * 8 + file + 1)))) {
-                            can_be_attacked = true;
-                            break;
-                        }
-                    }
-                    if (!can_be_attacked) is_outpost = true;
-                }
-            } else if (s == BLACK && rank >= 1 && rank <= 3) {
-                // Similar for black
-                if ((file > 0 && (pos.pieces[BLACK][PAWN] & bit(sq + 9))) ||
-                    (file < 7 && (pos.pieces[BLACK][PAWN] & bit(sq + 7)))) {
-                    bool can_be_attacked = false;
-                    for (int r = rank + 1; r < 8; r++) {
-                        if ((file > 0 && (pos.pieces[WHITE][PAWN] & bit(r * 8 + file - 1))) ||
-                            (file < 7 && (pos.pieces[WHITE][PAWN] & bit(r * 8 + file + 1)))) {
-                            can_be_attacked = true;
-                            break;
-                        }
-                    }
-                    if (!can_be_attacked) is_outpost = true;
-                }
-            }
-            
-            if (is_outpost) score += sign * 30;
-        }
-    }
-    
-    return (pos.side == WHITE) ? score : -score;
-}
 
 /* ===============================
    TRANSPOSITION TABLE
 ================================ */
 
-enum { EXACT, LOWER, UPPER };
-
-struct TTEntry {
-    U64 key;        // Full 64-bit key for collision detection
-    int depth;
-    int score;
-    int flag;
-    int age;        // NEW: for replacement scheme
-};
-
-constexpr int TT_SIZE = 1 << 20;
-TTEntry TT[TT_SIZE];
-
-TTEntry* tt_probe(U64 key) {
-    return &TT[key & (TT_SIZE - 1)];
-}
 
 // Move ordering structures
 struct ScoredMove {
@@ -1897,18 +1421,22 @@ struct ScoredMove {
     int score;
 };
 
-Move killers[100][2]; // [ply][slot]
-int history[2][64][64]; // [side][from][to] - History heuristic
-Move countermoves[64][64]; // [from][to] -> countermove
-int continuation_history[2][6][64]; // [side][piece][to] - simplified for memory efficiency
+// Global arrays for move ordering and history
+TTEntry TT[TT_SIZE];
+Move killers[MAX_PLY][KILLER_SLOTS];
+int history[2][64][64];
+Move countermoves[64][64];
+int continuation_history[2][6][64];
+int capture_history[2][7][64];
 
-// MVV-LVA scoring
+// [PHASE 5] Enhanced MVV-LVA scoring with full SEE and capture history
 int score_move(const Position& pos, const Move& m, const Move& tt_move, const Move& killer1, const Move& killer2, int ply, const Move& prev_move) {
-    // TT move first - safety check for valid move
-    if (tt_move.from != tt_move.to && m.from == tt_move.from && m.to == tt_move.to && m.promo == tt_move.promo)
+    // [PHASE 1] FIX: TT move first - safety check for valid move
+    if (tt_move.from != 0 && tt_move.to != 0 &&
+        m.from == tt_move.from && m.to == tt_move.to && m.promo == tt_move.promo)
         return 10000000;
     
-    // Winning captures (MVV-LVA with SEE approximation)
+    // [PHASE 1] FIX: Winning captures with full SEE
     if (pos.occ[pos.side ^ 1] & bit(m.to)) {
         int victim = 0, attacker = 0;
         for (int p = 1; p <= 6; p++) {
@@ -1916,30 +1444,43 @@ int score_move(const Position& pos, const Move& m, const Move& tt_move, const Mo
             if (pos.pieces[pos.side][p] & bit(m.from)) attacker = p;
         }
         
-        // SEE (Static Exchange Evaluation) approximation
-        int see_score = pieceValue[victim] - pieceValue[attacker];
+        // [PHASE 1] FIX: Use full SEE instead of approximation
+        int see_score = see(pos, m);
+        
+        // [PHASE 5] Add capture history bonus
+        int capture_bonus = 0;
+        if (victim >= 1 && victim <= 6 && m.to >= 0 && m.to < 64) {
+            capture_bonus = capture_history[pos.side][victim][m.to] / 10;
+        }
+        
         if (see_score >= 0) {
-            return 1000000 + victim * 100 - attacker; // Good captures
+            return 1000000 + victim * 100 - attacker + capture_bonus; // Good captures
         } else {
-            return -1000000 + see_score; // Bad captures (losing exchanges)
+            return -1000000 + see_score + capture_bonus; // Bad captures (losing exchanges)
         }
     }
     
-    // Killers
-    if (m.from == killer1.from && m.to == killer1.to) return 900000;
-    if (m.from == killer2.from && m.to == killer2.to) return 800000;
+    // [PHASE 5] Enhanced Killers - check multiple slots with bounds
+    if (ply >= 0 && ply < MAX_PLY) {
+        for (int slot = 0; slot < KILLER_SLOTS; slot++) {
+            if (m.from == killers[ply][slot].from && m.to == killers[ply][slot].to) {
+                return 900000 - (slot * 50000); // Decreasing priority for later slots
+            }
+        }
+    }
     
-    // Countermove heuristic - only if previous move is valid (not null move)
-    if (prev_move.from != prev_move.to) {
+    // [PHASE 5] Countermove heuristic with bounds checking
+    if (prev_move.from != prev_move.to && prev_move.from >= 0 && prev_move.from < 64 &&
+        prev_move.to >= 0 && prev_move.to < 64) {
         Move counter = countermoves[prev_move.from][prev_move.to];
         if (m.from == counter.from && m.to == counter.to && m.promo == counter.promo) {
-            return 850000; // Between killers and history
+            return 850000;
         }
     }
     
-    // Continuation history - only if previous move is valid (not null move)
+    // [PHASE 5] Continuation history with strict bounds checking
     if (prev_move.from != prev_move.to) {
-        int curr_piece = -1; // Initialize to invalid value
+        int curr_piece = -1;
         for (int p = 1; p <= 6; p++) {
             if (pos.pieces[pos.side][p] & bit(m.from)) {
                 curr_piece = p - 1; // 0-indexed
@@ -1947,24 +1488,37 @@ int score_move(const Position& pos, const Move& m, const Move& tt_move, const Mo
             }
         }
         
-        // Safety check for array bounds - ensure piece is valid and square is valid
-        if (curr_piece >= 0 && curr_piece < 6 && m.to >= 0 && m.to < 64) {
-            return history[pos.side][m.from][m.to] / 10 +
-                    continuation_history[pos.side][curr_piece][m.to] / 20;
+        // Strict bounds checking
+        if (curr_piece >= 0 && curr_piece < 6 && m.to >= 0 && m.to < 64 &&
+            m.from >= 0 && m.from < 64) {
+            int history_score = history[pos.side][m.from][m.to];
+            int cont_score = continuation_history[pos.side][curr_piece][m.to];
+            // Apply gravity to prevent overflow
+            history_score = min(history_score, HISTORY_GRAVITY);
+            cont_score = min(cont_score, HISTORY_GRAVITY);
+            return history_score / 10 + cont_score / 20;
         }
     }
     
     // Promotions
     if (m.promo == QUEEN) return 700000;
+    if (m.promo) return 600000; // Other promotions
     
-    // History heuristic
-    return history[pos.side][m.from][m.to] / 10;
+    // [PHASE 5] History heuristic with gravity and bounds checking
+    if (m.from >= 0 && m.from < 64 && m.to >= 0 && m.to < 64) {
+        int history_score = history[pos.side][m.from][m.to];
+        history_score = min(history_score, HISTORY_GRAVITY); // Apply gravity
+        return history_score / 10;
+    }
+    
+    return 0; // Fallback for invalid moves
 }
 
 // =============================================================
-// [1] PRECISE STATIC EXCHANGE EVALUATION (SEE - Swap Algorithm)
+// [1] PRECISE STATIC EXCHANGE EVALUATION (SEE - Full Swap Algorithm)
 // =============================================================
 // Determines if a capture sequence is actually profitable or a blunder.
+// Uses full swap algorithm with all attackers/defenders.
 
 int get_piece_value(int piece) {
     if (piece == 0) return 0;
@@ -1973,43 +1527,154 @@ int get_piece_value(int piece) {
     return values[piece];
 }
 
+// Helper: Get all attackers of a square for a specific side
+U64 get_attackers(const Position& pos, int sq, int side) {
+    U64 attackers = 0;
+    
+    // Pawns
+    if (side == WHITE) {
+        attackers |= (pos.pieces[WHITE][PAWN] >> 7) & notHFile & bit(sq);
+        attackers |= (pos.pieces[WHITE][PAWN] >> 9) & notAFile & bit(sq);
+    } else {
+        attackers |= (pos.pieces[BLACK][PAWN] << 7) & notAFile & bit(sq);
+        attackers |= (pos.pieces[BLACK][PAWN] << 9) & notHFile & bit(sq);
+    }
+    
+    // Knights
+    U64 knights = pos.pieces[side][KNIGHT];
+    while (knights) {
+        int s = poplsb(knights);
+        if (knight_moves[s] & bit(sq)) attackers |= bit(s);
+    }
+    
+    // Bishops/Queens (diagonal)
+    U64 bishops = pos.pieces[side][BISHOP] | pos.pieces[side][QUEEN];
+    while (bishops) {
+        int s = poplsb(bishops);
+        if (bishop_attacks(s, pos.all) & bit(sq)) attackers |= bit(s);
+    }
+    
+    // Rooks/Queens (straight)
+    U64 rooks = pos.pieces[side][ROOK] | pos.pieces[side][QUEEN];
+    while (rooks) {
+        int s = poplsb(rooks);
+        if (rook_attacks(s, pos.all) & bit(sq)) attackers |= bit(s);
+    }
+    
+    // King
+    U64 king = pos.pieces[side][KING];
+    if (king) {
+        int ks = lsb(king);
+        if (king_moves[ks] & bit(sq)) attackers |= bit(ks);
+    }
+    
+    return attackers;
+}
+
+// Helper: Get least valuable attacker from a bitboard
+int get_least_valuable_attacker(const Position& pos, U64 attackers) {
+    if (attackers == 0) return 0;
+    
+    // Check in order: Pawn, Knight, Bishop, Rook, Queen, King
+    for (int p = PAWN; p <= KING; p++) {
+        U64 piece_attacks = attackers & pos.pieces[pos.side][p];
+        if (piece_attacks) {
+            return p;
+        }
+    }
+    return 0;
+}
+
 int see(const Position& pos, Move m) {
     int from = m.from, to = m.to, promo = m.promo;
+    int us = pos.side;
+    int them = us ^ 1;
     
-    // 1. Identify valid victim
+    // 1. Identify initial victim
     int victim = 0;
     for(int p=1; p<=6; p++) {
-        if(pos.pieces[pos.side^1][p] & bit(to)) {
+        if(pos.pieces[them][p] & bit(to)) {
             victim = p;
             break;
         }
     }
     // Handle En Passant
-    if (m.promo == 0 && (pos.pieces[pos.side][PAWN] & bit(from)) && to == pos.ep) {
+    if (m.promo == 0 && (pos.pieces[us][PAWN] & bit(from)) && to == pos.ep) {
         victim = PAWN;
     }
+    
+    if (victim == 0) return 0; // No victim (shouldn't happen for captures)
     
     // Initial score (Value of piece we just captured)
     int score = get_piece_value(victim);
     if (promo) score += get_piece_value(promo) - get_piece_value(PAWN);
-
-    // If square isn't defended, we just won the piece for free. Return score.
-    if (!is_square_attacked(pos, to, pos.side^1)) return score;
-
-    // 2. The Swap Logic (Simplified for single-file performance)
-    // We captured a piece, but the square is defended.
-    // We assume the opponent will recapture with their least valuable attacker.
     
-    // Get value of OUR piece that just moved
+    // Get value of our attacking piece
     int attacker_val = 0;
-    for(int p=1; p<=6; p++) if(pos.pieces[pos.side][p] & bit(from)) { attacker_val = get_piece_value(p); break;}
+    for(int p=1; p<=6; p++) {
+        if(pos.pieces[us][p] & bit(from)) {
+            attacker_val = get_piece_value(p);
+            break;
+        }
+    }
     
-    // If we captured a piece MORE valuable than ours (e.g. Pawn takes Queen), it's always good.
-    if (score >= attacker_val) return score;
+    // If square isn't defended, we just won the piece for free
+    U64 defenders = get_attackers(pos, to, them);
+    if (defenders == 0) {
+        return score;
+    }
     
-    // If we captured a piece LESS valuable (e.g. Queen takes Pawn), and it's defended...
-    // We lose our piece and get the pawn. Net change: Pawn - Queen.
-    return score - attacker_val;
+    // 2. Full Swap Algorithm
+    // Simulate the capture sequence: we capture, they recapture, we recapture, etc.
+    int swap_score = score - attacker_val;
+    
+    // Get next attacker (defender recaptures)
+    U64 current_attackers = defenders;
+    int current_side = them;
+    int last_attacker_val = attacker_val;
+    
+    while (true) {
+        // Find least valuable defender
+        int defender_piece = get_least_valuable_attacker(pos, current_attackers);
+        if (defender_piece == 0) break;
+        
+        int defender_val = get_piece_value(defender_piece);
+        
+        // If defender is more valuable than what it captures, it's a losing exchange
+        if (defender_val > last_attacker_val) {
+            swap_score -= defender_val;
+            break;
+        }
+        
+        // Add defender's value to score (we gain it when we recapture)
+        swap_score += defender_val;
+        
+        // Remove this defender from future consideration
+        U64 defender_bit = pos.pieces[current_side][defender_piece] & current_attackers;
+        current_attackers &= ~defender_bit;
+        
+        // Switch sides
+        current_side = us;
+        last_attacker_val = defender_val;
+        
+        // Get our next attacker
+        U64 our_attackers = get_attackers(pos, to, us);
+        // Remove pieces already used
+        our_attackers &= ~bit(from);
+        
+        int next_attacker = get_least_valuable_attacker(pos, our_attackers);
+        if (next_attacker == 0) break;
+        
+        int next_val = get_piece_value(next_attacker);
+        swap_score -= next_val;
+        last_attacker_val = next_val;
+        
+        // Remove this attacker
+        U64 next_bit = pos.pieces[us][next_attacker] & our_attackers;
+        current_attackers = get_attackers(pos, to, them) & ~next_bit;
+    }
+    
+    return swap_score;
 }
 
 
@@ -2181,17 +1846,96 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int& halfmove_cloc
         return eval;
     }
 
-    // Null Move Pruning
-    if (do_null && !in_check && depth >= 3 && eval >= beta) {
-        int R = 2 + (depth / 6);
-        pos.side ^= 1; int old_ep = pos.ep; pos.ep = -1;
-        int score = -pvs_search(pos, depth - 1 - R, -beta, -beta + 1, halfmove_clock, history, ply + 1, false, {0,0,0});
-        pos.ep = old_ep; pos.side ^= 1;
-        if (g_stop_search.load()) return 0;
-        if (score >= beta) return beta;
+    // [PHASE 2] Razoring
+    if (!in_check && depth <= 3 && eval + 300 < alpha) {
+        int razor_score = quiescence(pos, alpha, beta, ply);
+        if (razor_score < alpha) return razor_score;
     }
 
-    // Internal Iterative Deepening (IID)
+    // [PHASE 2] Probcut
+    if (depth >= 5 && abs(beta) < 20000) {
+        int probcut_beta = beta + 200;
+        int probcut_count = 0;
+        // Search captures at reduced depth to see if we can prune
+        std::vector<Move> moves;
+        generate_moves(pos, moves);
+        
+        for (const auto& m : moves) {
+            if (!(pos.occ[pos.side ^ 1] & bit(m.to))) continue; // Only captures
+            
+            Undo u; int hc = halfmove_clock;
+            make_move(pos, m, u, hc);
+            
+            if (is_our_king_attacked_after_move(pos, pos.side ^ 1)) {
+                unmake_move(pos, m, u, halfmove_clock);
+                continue;
+            }
+            
+            int score = -pvs_search(pos, depth - 3, -probcut_beta, -probcut_beta + 1, hc, history, ply + 1, true, m);
+            unmake_move(pos, m, u, halfmove_clock);
+            
+            if (score >= probcut_beta) {
+                if (g_stop_search.load()) return 0;
+                return beta; // Prune this node
+            }
+            
+            if (procut_count++ > 3) break; // Limit checks
+        }
+    }
+
+    // [PHASE 2] Improved Null Move Pruning with verification
+    if (do_null && !in_check && depth >= 3 && eval >= beta) {
+        // Don't use NMP in endgame (zugzwang risk)
+        int non_pawn_material = 0;
+        for (int p = KNIGHT; p <= QUEEN; p++) {
+            non_pawn_material += (int)__popcnt64(pos.pieces[WHITE][p] | pos.pieces[BLACK][p]) * pesto_values[p];
+        }
+        
+        if (non_pawn_material >= 1300) { // Only in middlegame
+            int R = 2 + (depth / 6);
+            pos.side ^= 1; int old_ep = pos.ep; pos.ep = -1;
+            int score = -pvs_search(pos, depth - 1 - R, -beta, -beta + 1, hc, history, ply + 1, false, {0,0,0});
+            pos.ep = old_ep; pos.side ^= 1;
+            if (g_stop_search.load()) return 0;
+            if (score >= beta) return beta;
+        }
+    }
+
+    // [PHASE 2] Multi-Cut Pruning
+    if (depth >= 6 && !in_check) {
+        int cutoff_count = 0;
+        std::vector<Move> moves;
+        generate_moves(pos, moves);
+        
+        // Score moves quickly
+        std::vector<ScoredMove> quick_moves;
+        Move k1 = killers[ply][0]; Move k2 = killers[ply][1];
+        for (const auto& m : moves) {
+            quick_moves.push_back({m, score_move(pos, m, tt_move, k1, k2, ply, prev_move)});
+        }
+        sort_moves(quick_moves);
+        
+        for (int i = 0; i < std::min(3, (int)quick_moves.size()); i++) {
+            Move m = quick_moves[i].move;
+            Undo u; int hc = halfmove_clock;
+            make_move(pos, m, u, hc);
+            
+            if (is_our_king_attacked_after_move(pos, pos.side ^ 1)) {
+                unmake_move(pos, m, u, halfmove_clock);
+                continue;
+            }
+            
+            int score = -pvs_search(pos, depth - 3, -beta, -beta + 1, hc, history, ply + 1, true, m);
+            unmake_move(pos, m, u, halfmove_clock);
+            
+            if (score >= beta) {
+                cutoff_count++;
+                if (cutoff_count >= 3) return beta; // Multi-cut
+            }
+        }
+    }
+
+    // [PHASE 2] Internal Iterative Deepening (IID)
     // If we are in a PV node (depth is high) but have no TT move,
     // do a quick shallow search to find a "Best Move" to seed the sorting.
     if (depth >= 6 && !tt_hit) {
@@ -2225,7 +1969,7 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int& halfmove_cloc
         Move m = scored_moves[i].move;
         bool is_capture = (pos.occ[pos.side^1] & bit(m.to)) || (m.promo && m.to == pos.ep);
         
-        // Late Move Pruning (LMP)
+        // [PHASE 2] Late Move Pruning (LMP)
         // If we've searched many moves at low depth and haven't found a cutoff, stop.
         if (depth <= 4 && !in_check && !is_capture && legal_moves > (8 + depth*depth)) {
              continue;
@@ -2240,28 +1984,45 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int& halfmove_cloc
         }
         legal_moves++;
         
+        // [PHASE 2] Singular Extensions
+        // If TT move is much better than alternatives, extend search
+        int extension = 0;
+        if (depth >= 8 && tt_hit && m.from == tt_move.from && m.to == tt_move.to &&
+            tte->depth >= depth - 3 && legal_moves == 1) {
+            // Search other moves at reduced depth to see if TT move is singular
+            int singular_beta = tte->score - 50 * depth;
+            int singular_score = -pvs_search(pos, depth / 2, -singular_beta - 1, -singular_beta, hc, history, ply + 1, true, m);
+            
+            if (singular_score < singular_beta) {
+                extension = 1; // TT move is singular, extend
+            }
+        }
+        
         int score;
         if (legal_moves == 1) {
             // PV Search: Full Window
-            score = -pvs_search(pos, depth - 1, -beta, -alpha, hc, history, ply + 1, true, m);
+            score = -pvs_search(pos, depth - 1 + extension, -beta, -alpha, hc, history, ply + 1, true, m);
         } else {
-            // LMR (Late Move Reduction)
+            // [PHASE 2] Improved LMR Formula
             int R = 0;
             if (depth >= 3 && !is_capture && !in_check && i > 3) {
-                R = 1 + (depth / 6);
-                if (i > 15) R++; // Reduce more for very late moves
+                // Logarithmic reduction
+                R = (int)(0.75 + log(depth) * log(i) / 2.25);
+                if (!extension) R++; // Increase reduction if not extended
+                if (is_capture) R--; // Reduce less for captures
+                if (R > depth - 2) R = depth - 2; // Don't reduce below depth 2
             }
             
             // Search with Reduced Depth and Zero Window
-            score = -pvs_search(pos, depth - 1 - R, -alpha - 1, -alpha, hc, history, ply + 1, true, m);
+            score = -pvs_search(pos, depth - 1 + extension - R, -alpha - 1, -alpha, hc, history, ply + 1, true, m);
             
             // Re-search if logic failed (it was better than we thought)
             if (score > alpha && R > 0) {
-                 score = -pvs_search(pos, depth - 1, -alpha - 1, -alpha, hc, history, ply + 1, true, m);
+                 score = -pvs_search(pos, depth - 1 + extension, -alpha - 1, -alpha, hc, history, ply + 1, true, m);
             }
             // Re-search if it beat Alpha search (found a new best move, need exact score)
             if (score > alpha && score < beta) {
-                 score = -pvs_search(pos, depth - 1, -beta, -alpha, hc, history, ply + 1, true, m);
+                 score = -pvs_search(pos, depth - 1 + extension, -beta, -alpha, hc, history, ply + 1, true, m);
             }
         }
         
@@ -2333,142 +2094,6 @@ U64 bishop_mask(int sq) {
     return mask;
 }
 
-// ===============================
-// MAGICS INITIALIZATION
-// ==============================
-
-void init_magics() {
-    // Initialize knight moves
-    for (int sq = 0; sq < 64; sq++) {
-        int r = sq / 8, f = sq % 8;
-        U64 moves = 0;
-        int offsets[8] = { 17, 15, 10, 6, -6, -10, -15, -17 };
-        for (int o : offsets) {
-            int t = sq + o;
-            if (t >= 0 && t < 64) {
-                int r1 = sq / 8, f1 = sq % 8;
-                int r2 = t / 8, f2 = t % 8;
-                if (abs(r1 - r2) <= 2 && abs(f1 - f2) <= 2) {
-                    moves |= bit(t);
-                }
-            }
-        }
-        knight_moves[sq] = moves;
-    }
-    
-    // Initialize king moves
-    for (int sq = 0; sq < 64; sq++) {
-        int r = sq / 8, f = sq % 8;
-        U64 moves = 0;
-        int offsets[8] = { 1, -1, 8, -8, 9, -9, 7, -7 };
-        for (int o : offsets) {
-            int t = sq + o;
-            if (t >= 0 && t < 64) {
-                int r1 = sq / 8, f1 = sq % 8;
-                int r2 = t / 8, f2 = t % 8;
-                if (abs(r1 - r2) <= 1 && abs(f1 - f2) <= 1) {
-                    moves |= bit(t);
-                }
-            }
-        }
-        king_moves[sq] = moves;
-    }
-    
-    // Initialize rook and bishop masks
-    for (int sq = 0; sq < 64; sq++) {
-        rookMasks[sq] = rook_mask(sq);
-        bishopMasks[sq] = bishop_mask(sq);
-    }
-    
-    // Initialize rook attacks
-    for (int sq = 0; sq < 64; sq++) {
-        U64 mask = rookMasks[sq];
-        int bits = 0;
-        U64 temp = mask;
-        while (temp) {
-            bits++;
-            temp &= temp - 1;
-        }
-        rookMagics[sq].mask = mask;
-        rookMagics[sq].magic = rookMagicNums[sq];
-        rookMagics[sq].shift = 64 - bits;
-        rookMagics[sq].attacks = rookAttacks[sq];
-        
-        for (int i = 0; i < (1 << bits); i++) {
-            U64 blockers = 0;
-            U64 idx = i;
-            for (int b = 0; b < 64; b++) {
-                if (mask & bit(b)) {
-                    if (idx & 1) blockers |= bit(b);
-                    idx >>= 1;
-                }
-            }
-            // Use magic hash as index when storing
-            int magic_idx = (int)((blockers * rookMagics[sq].magic) >> rookMagics[sq].shift);
-            rookAttacks[sq][magic_idx] = rook_attack_on_the_fly(sq, blockers);
-        }
-    }
-    
-    // Initialize bishop attacks
-    for (int sq = 0; sq < 64; sq++) {
-        U64 mask = bishopMasks[sq];
-        int bits = 0;
-        U64 temp = mask;
-        while (temp) {
-            bits++;
-            temp &= temp - 1;
-        }
-        bishopMagics[sq].mask = mask;
-        bishopMagics[sq].magic = bishopMagicNums[sq];
-        bishopMagics[sq].shift = 64 - bits;
-        bishopMagics[sq].attacks = bishopAttacks[sq];
-        
-        for (int i = 0; i < (1 << bits); i++) {
-            U64 blockers = 0;
-            U64 idx = i;
-            for (int b = 0; b < 64; b++) {
-                if (mask & bit(b)) {
-                    if (idx & 1) blockers |= bit(b);
-                    idx >>= 1;
-                }
-            }
-            // Use magic hash as index when storing
-            int magic_idx = (int)((blockers * bishopMagics[sq].magic) >> bishopMagics[sq].shift);
-            bishopAttacks[sq][magic_idx] = bishop_attack_on_the_fly(sq, blockers);
-        }
-    }
-}
-
-// Initialize move tables
-void init_move_tables() {
-    // Initialize knight moves
-    for (int sq = 0; sq < 64; sq++) {
-        knight_moves[sq] = 0;
-        for (int offset : { 17, 15, 10, 6, -6, -10, -15, -17 }) {
-            int t = sq + offset;
-            if (t >= 0 && t < 64) {
-                int r1 = sq / 8, f1 = sq % 8;
-                int r2 = t / 8, f2 = t % 8;
-                if (abs(r1 - r2) <= 2 && abs(f1 - f2) <= 2)
-                    knight_moves[sq] |= bit(t);
-            }
-        }
-    }
-    // Initialize king moves
-    for (int sq = 0; sq < 64; sq++) {
-        king_moves[sq] = 0;
-        for (int offset : { 1, -1, 8, -8, 9, -9, 7, -7 }) {
-            int t = sq + offset;
-            if (t >= 0 && t < 64) {
-                int r1 = sq / 8, f1 = sq % 8;
-                int r2 = t / 8, f2 = t % 8;
-                if (abs(r1 - r2) <= 1 && abs(f1 - f2) <= 1)
-                    king_moves[sq] |= bit(t);
-            }
-        }
-    }
-}
-
 /* Convert move to UCI format */
 std::string move_to_uci(const Move& m) {
     char from_file = 'a' + (m.from % 8);
@@ -2537,368 +2162,53 @@ Move parse_uci_move(const Position& pos, const std::string& uci) {
     return {from, to, promo};
 }
 
-// Forward declare pvs_search for use in search_root
-int pvs_search(Position& pos, int depth, int alpha, int beta, int& halfmove_clock, std::vector<U64>& history, int ply, bool do_null, const Move& prev_move);
-
-// [PHASE 1 & 2] Root Search with Legal Move Validation and Strict Time Management
-Move search_root(Position& root, int depth, int time_ms) {
-    using namespace std::chrono;
-    
-    // Reset Globals
-    g_stop_search.store(false);
-    g_nodes_searched = 0;
-    g_allocated_time = time_ms;
-    g_start_time = duration_cast<milliseconds>(high_resolution_clock::now().time_since_epoch()).count();
-
-    // [PHASE 1] CRITICAL FIX: Strict Root Move Sanitization
-    // Generate ONLY legal moves for root - never trust pseudo-legal moves
-    generate_root_moves(root, g_root_moves);
-    
-    if (g_root_moves.empty()) {
-        // Checkmate or stalemate
-        return {0, 0, 0};
-    }
-    
-    // If only one legal move, play it immediately (saves time)
-    if (g_root_moves.size() == 1) {
-        std::cout << "info depth 0 score cp 0 nodes 0 time 0 pv " << move_to_uci(g_root_moves[0].move) << std::endl;
-        std::cout << "bestmove " << move_to_uci(g_root_moves[0].move) << std::endl;
-        return g_root_moves[0].move;
-    }
-
-    // Store best move from previous completed depth
-    Move best_move = g_root_moves[0].move;
-    Move previous_best = best_move;
-    int previous_best_score = -30000;
-    
-    // Iterative Deepening
-    for (int d = 1; d <= depth; ++d) {
-        int alpha = -30000;
-        int beta = 30000;
-        int best_score = -30000;
-        Move iteration_best = best_move;
-        bool depth_completed = true;
-        
-        // [PHASE 1] Atomic Time-Abort Protocol
-        // Check time before starting new depth
-        auto now = high_resolution_clock::now();
-        auto start = time_point<high_resolution_clock>(milliseconds(g_start_time));
-        auto elapsed = duration_cast<milliseconds>(now - start).count();
-        
-        // Leave 50ms buffer for final move output
-        if (time_ms > 0 && elapsed > (time_ms - 50)) {
-            break;
-        }
-        
-        // Move Ordering: TT move first, then captures, then others
-        std::vector<ScoredMove> ordered_moves;
-        for (const auto& rm : g_root_moves) {
-            const Move& m = rm.move;
-            int score = 0;
-            
-            // TT move gets highest priority (from previous depth)
-            if (m.from == previous_best.from && m.to == previous_best.to) {
-                score = 1000000;
-            }
-            // Captures get priority (MVV-LVA approximation)
-            else if (root.occ[root.side ^ 1] & bit(m.to)) {
-                int victim = 0;
-                for (int p = 1; p <= 6; p++) {
-                    if (root.pieces[root.side ^ 1][p] & bit(m.to)) {
-                        victim = p;
-                        break;
-                    }
-                }
-                score = 10000 + (victim * 100);
-            }
-            // Promotions
-            else if (m.promo) {
-                score = 5000;
-            }
-            
-            ordered_moves.push_back({m, score});
-        }
-        sort_moves(ordered_moves);
-        
-        int alpha_temp = alpha;
-        
-        // Search each move
-        for (int i = 0; i < ordered_moves.size(); ++i) {
-            Move m = ordered_moves[i].move;
-            Undo u; int hc = 0; std::vector<U64> h;
-            h.push_back(hash_position(root));
-            
-            make_move(root, m, u, hc);
-            
-            int score;
-            if (i == 0) {
-                // First move: full window
-                score = -pvs_search(root, d - 1, -beta, -alpha_temp, hc, h, 1, true, m);
-            } else {
-                // Other moves: zero window
-                score = -pvs_search(root, d - 1, -alpha_temp - 1, -alpha_temp, hc, h, 1, true, m);
-                
-                // Re-search if it failed high
-                if (score > alpha_temp && score < beta) {
-                    score = -pvs_search(root, d - 1, -beta, -alpha_temp, hc, h, 1, true, m);
-                }
-            }
-            
-            unmake_move(root, m, u, hc);
-            
-            // [PHASE 1] CRITICAL: Check for time abort
-            if (g_stop_search.load()) {
-                depth_completed = false;
-                break;
-            }
-            
-            // Check time during search (every 8 moves)
-            if ((i & 7) == 0) {
-                now = high_resolution_clock::now();
-                elapsed = duration_cast<milliseconds>(now - start).count();
-                if (time_ms > 0 && elapsed > (time_ms - 50)) {
-                    g_stop_search.store(true);
-                    depth_completed = false;
-                    break;
-                }
-            }
-            
-            if (score > best_score) {
-                best_score = score;
-                iteration_best = m;
-            }
-            
-            if (score > alpha_temp) {
-                alpha_temp = score;
-            }
-        }
-        
-        // [PHASE 1] SAFETY VALVE: Only update if depth completed
-        // If timeout occurs, DISCARD Depth N results, use Depth N-1
-        if (depth_completed && !g_stop_search.load()) {
-            best_move = iteration_best;
-            previous_best = iteration_best;
-            previous_best_score = best_score;
-            
-            // Output info
-            now = high_resolution_clock::now();
-            start = time_point<high_resolution_clock>(milliseconds(g_start_time));
-            elapsed = duration_cast<milliseconds>(now - start).count();
-            
-            std::cout << "info depth " << d
-                      << " score cp " << best_score
-                      << " nodes " << g_nodes_searched.load()
-                      << " time " << elapsed
-                      << " pv " << move_to_uci(best_move) << std::endl;
-        } else {
-            // [PHASE 1] CRITICAL FIX: Timeout occurred
-            // DISCARD current depth results, use previous depth
-            if (d > 1) {
-                std::cout << "info string Timeout - using depth " << (d-1) << " result" << std::endl;
-                best_move = previous_best;
-                best_score = previous_best_score;
-            }
-            break;
-        }
-    }
-
-    // Always print bestmove
-    std::cout << "bestmove " << move_to_uci(best_move) << std::endl;
-    return best_move;
-}
-
-// ===============================
-// UCI LOOP (FOR INTERFACE)
-// ==============================
-
-void uci_loop() {
-    std::string line;
-    while (std::getline(std::cin, line)) {
-        std::istringstream iss(line);
-        std::string token;
-        iss >> token;
-        if (token == "uci") {
-            std::cout << "id name Douchess\n";
-            std::cout << "id author Doulet Media Developer Team\n";
-            std::cout << "uciok\n";
-        } else if (token == "isready") {
-            std::cout << "readyok\n";
-        } else if (token == "ucinewgame") {
-            // CRITICAL FIX: Clear transposition table and history tables on new game
-            // Clear TT
-            for (int i = 0; i < TT_SIZE; i++) {
-                TT[i].key = 0;
-                TT[i].depth = 0;
-                TT[i].score = 0;
-                TT[i].flag = 0;
-                TT[i].age = 0;
-            }
-            
-            // Clear history tables
-            memset(history, 0, sizeof(history));
-            memset(killers, 0, sizeof(killers));
-            memset(countermoves, 0, sizeof(countermoves));
-            memset(continuation_history, 0, sizeof(continuation_history));
-            
-            // Reset global move and TT move
-            g_tt_move = Move{0, 0, 0};
-        } else if (token == "position") {
-            std::string sub;
-            iss >> sub;
-            if (sub == "startpos") {
-                g_current_position = start_position();
-                std::string moves_token;
-                if (iss >> moves_token && moves_token == "moves") {
-                    std::string move_str;
-                    while (iss >> move_str) {
-                        Move m = parse_uci_move(g_current_position, move_str);
-                        Undo u;
-                        int hc = 0;
-                        make_move(g_current_position, m, u, hc);
-                    }
-                }
-            } else if (sub == "fen") {
-                std::string fen;
-                std::string part;
-                while (iss >> part && part != "moves") {
-                    fen += part + " ";
-                }
-                g_current_position = fen_to_position(fen);
-
-                if (part == "moves") {
-                    std::string move_str;
-                    while (iss >> move_str) {
-                        Move m = parse_uci_move(g_current_position, move_str);
-                        Undo u;
-                        int hc = 0;
-                        make_move(g_current_position, m, u, hc);
-                    }
-                }
-            }
-        } else if (token == "go") {
-            int wtime = 0, btime = 0, winc = 0, binc = 0;
-            int movetime = 0;  // ADD THIS
-            int depth = 99;     // ADD THIS
-
-            std::string t;
-            while (iss >> t) {
-                if (t == "wtime") iss >> wtime;
-                else if (t == "btime") iss >> btime;
-                else if (t == "winc") iss >> winc;
-                else if (t == "binc") iss >> binc;
-                else if (t == "movetime") iss >> movetime;  // ADD THIS
-                else if (t == "depth") iss >> depth;        // ADD THIS
-            }
-
-            int time_ms = 1000; // Default 1 second
-
-            // If movetime is specified, use it directly
-            if (movetime > 0) {
-                time_ms = movetime;
-            }
-            // Otherwise calculate from wtime/btime
-            else if (wtime > 0 || btime > 0) {
-                int side = g_current_position.side;
-                int mytime = (side == WHITE) ? wtime : btime;
-                int myinc = (side == WHITE) ? winc : binc;
-
-                if (mytime > 0) {
-                    int target = std::max(10, std::min(mytime / 30 + myinc, mytime));
-                    time_ms = target;
-                }
-            }
-
-            // [PHASE 4] Hard Time Cap: 950ms for 1000ms limit
-            // This leaves 50ms for cleanup and output
-            if (movetime > 0) {
-                time_ms = std::min(movetime, 950);
-            } else if (time_ms > 0) {
-                time_ms = std::min(time_ms, 950);
-            } else {
-                time_ms = 950; // Default safety cap
-            }
-
-            // Limit maximum search depth to prevent stack overflow
-            if (depth > 30) {
-                depth = 30;
-            }
-
-            Position p = g_current_position;
-            Move m = search_root(p, depth, time_ms);
-
-            // Note: search_root now prints the UCI 'bestmove' line directly before returning.
-            // The engine previously printed 'bestmove' here; that output has been centralized to
-            // the search_root function to ensure the GUI always receives the final bestmove.
-
-            // No additional printing here; continue the loop
-        } else if (token == "stop") {
-            g_stop_search.store(true);
-        } else if (token == "quit") {
-            break;
-        }
-    }
-}
-
-// Initialize search-related arrays
-void init_search() {
-    // Initialize killers
-    for (int i = 0; i < 100; i++) {
-        killers[i][0] = {0, 0, 0};
-        killers[i][1] = {0, 0, 0};
-    }
-    
-    // Initialize TT move
-    g_tt_move = Move{0, 0, 0};
-    
-    // Initialize history
-    for (int s = 0; s < 2; s++) {
-        for (int f = 0; f < 64; f++) {
-            for (int t = 0; t < 64; t++) {
-                history[s][f][t] = 0;
-            }
-        }
-    }
-    
-    // Initialize countermoves
-    for (int f = 0; f < 64; f++) {
-        for (int t = 0; t < 64; t++) {
-            countermoves[f][t] = {0, 0, 0};
-        }
-    }
-    
-    // Initialize continuation history
-    for (int s = 0; s < 2; s++) {
-        for (int p = 0; p < 6; p++) {
-            for (int sq = 0; sq < 64; sq++) {
-                continuation_history[s][p][sq] = 0;
-            }
-        }
-    }
-    
-    // Initialize TT
-    for (int i = 0; i < TT_SIZE; i++) {
-        TT[i].key = 0;
-        TT[i].depth = 0;
-        TT[i].score = 0;
-        TT[i].flag = 0;
-        TT[i].age = 0;
-    }
-}
+// Forward phase 1
+void init_magics();
+void init_zobrist();
+void init_move_tables();
+void init_search();
 
 int main() {
-    init_magics();
-    init_zobrist();
-    init_move_tables();
-    init_search(); // Initialize all search arrays
-    init_eval_params(); // Initialize evaluation parameters for tuning
+    // Initialize random number generators for Zobrist hashing
+    std::srand(static_cast<unsigned int>(std::time(nullptr)));
     
-    // initialize global UCI position after start_position is available
-    g_current_position = start_position();
-    // Enable UCI loop as primary interface
+    // Initialize hash table size
+    TTEntry* tt_entries = new TTEntry[TT_SIZE];
+    for (int i = 0; i < TT_SIZE; i++) {
+        tt_entries[i].key = 0;
+        tt_entries[i].depth = 0;
+        tt_entries[i].score = 0;
+        tt_entries[i].flag = 0;
+        tt_entries[i].age = 0;
+    }
+    
+    // Initialize magic bitboards
+    init_magics();
+    
+    // Initialize Zobrist hashing
+    init_zobrist();
+    
+    // Initialize move tables
+    init_move_tables();
+    
+    // Initialize search parameters
+    init_search();
+    
+    // Print engine info
+    std::cout << "Douchess Engine Initialized" << std::endl;
+    std::cout << "Author: Doulet Media Developer Team" << std::endl;
+    
+    // UCI loop
     uci_loop();
     
-    // Test the fixes to ensure engine no longer resigns incorrectly
-    test_fixes();
+    // Cleanup
+    delete[] tt_entries;
     
     return 0;
 }
+
+
+
+
+
+
