@@ -61,7 +61,7 @@ const int REVERSE_FUTILITY_MARGIN = 100;  // Was 150, now less aggressive
 const int HISTORY_MAX = 10000;
 const int EVAL_CLAMP_MAX = 5000;
 const int EVAL_CLAMP_MIN = -5000;
-const int ASPIRATION_WINDOW = 75;  // Wider window, fewer re-searches
+const int ASPIRATION_WINDOW = 25;  // Narrow window for speed
 
 // Piece types
 enum { P, N, B, R, Q, K };
@@ -1463,6 +1463,10 @@ int eval_pawns(const Position& pos);
 int eval_king_safety(const Position& pos, int color);
 int eval_mobility(const Position& pos, int color);
 int eval_development(const Position& pos, int color);
+int eval_rook_on_seventh(const Position& pos, int color);
+int eval_connected_rooks(const Position& pos, int color);
+int eval_backward_pawns(const Position& pos);
+int eval_outposts(const Position& pos, int color);
 
 // ========================================
 // INSERT: Tapered Evaluation (Middlegame + Endgame)
@@ -1599,7 +1603,7 @@ int evaluate_position_tapered(const Position& pos) {
         }
         
         // FIX: Only add mobility to MIDDLEGAME score (not both!)
-        mg_score += sign * (eval_mobility(pos, color) / 5);  // Divide by 5 to increase impact
+        mg_score += sign * (eval_mobility(pos, color) / 3);  // Stronger mobility evaluation
         
         // FIX: Only add king safety to MIDDLEGAME score
         mg_score += sign * eval_king_safety(pos, color);
@@ -1611,7 +1615,7 @@ int evaluate_position_tapered(const Position& pos) {
         mg_score -= sign * detect_hanging_pieces(pos, color) * 2;  // ✅ DOUBLE the penalty!
         
         // Threat detection
-        mg_score -= sign * detect_threats(pos, color) / 10;
+        mg_score -= sign * detect_threats(pos, color) / 3;
         
         // Tactical pattern detection
         mg_score += sign * detect_tactical_patterns(pos, color);
@@ -1626,6 +1630,9 @@ int evaluate_position_tapered(const Position& pos) {
     mg_score += pawn_score;
     eg_score += pawn_score;
     
+    // Add new evaluation functions (moved outside color loop)
+    // These will be added after the color loop ends
+    
     // Add bishop pair bonus (more valuable in endgame)
     int white_bishops = count_bits(pos.pieces[WHITE][B]);
     int black_bishops = count_bits(pos.pieces[BLACK][B]);
@@ -1633,6 +1640,12 @@ int evaluate_position_tapered(const Position& pos) {
     if (black_bishops >= 2) mg_score -= 50;
     if (white_bishops >= 2) eg_score += 70;
     if (black_bishops >= 2) eg_score -= 70;
+    
+    // Add new evaluation functions (called once for the whole position)
+    mg_score += eval_rook_on_seventh(pos, WHITE) - eval_rook_on_seventh(pos, BLACK);
+    mg_score += eval_connected_rooks(pos, WHITE) - eval_connected_rooks(pos, BLACK);
+    mg_score += eval_outposts(pos, WHITE) - eval_outposts(pos, BLACK);
+    mg_score += eval_backward_pawns(pos);
     
     // Calculate phase and interpolate
     int phase = calculate_phase(pos);
@@ -1729,6 +1742,205 @@ int eval_isolated_pawns(const Position& pos) {
     }
     
     return score;
+}
+
+// ========================================
+// ROOK ON 7TH RANK EVALUATION
+// ========================================
+int eval_rook_on_seventh(const Position& pos, int color) {
+    int bonus = 0;
+    U64 rooks = pos.pieces[color][R];
+    
+    // 7th rank for white is rank 1 (indices 8-15 in a8=0)
+    // 7th rank for black is rank 6 (indices 48-55 in a8=0)
+    int seventh_rank_start = (color == WHITE) ? 8 : 48;
+    int seventh_rank_end = seventh_rank_start + 7;
+    
+    while (rooks) {
+        int sq = lsb_index(rooks);
+        pop_bit(rooks, sq);
+        
+        if (sq >= seventh_rank_start && sq <= seventh_rank_end) {
+            bonus += 50;  // Big bonus for rook on 7th
+        }
+    }
+    
+    return bonus;
+}
+
+// ========================================
+// CONNECTED ROOKS EVALUATION
+// ========================================
+int eval_connected_rooks(const Position& pos, int color) {
+    U64 rooks = pos.pieces[color][R];
+    if (count_bits(rooks) < 2) return 0;
+    
+    int bonus = 0;
+    U64 temp_rooks = rooks;
+    
+    while (temp_rooks) {
+        int sq1 = lsb_index(temp_rooks);
+        pop_bit(temp_rooks, sq1);
+        
+        U64 remaining = temp_rooks;
+        while (remaining) {
+            int sq2 = lsb_index(remaining);
+            pop_bit(remaining, sq2);
+            
+            // Check if rooks are on same file or rank
+            if (sq1 / 8 == sq2 / 8 || sq1 % 8 == sq2 % 8) {
+                // Check if path is clear
+                U64 between = get_rook_attacks(sq1, pos.occupancies[2]) & (1ULL << sq2);
+                if (between) {
+                    bonus += 30;  // Connected rooks bonus
+                }
+            }
+        }
+    }
+    
+    return bonus;
+}
+
+// ========================================
+// BACKWARD PAWNS EVALUATION
+// ========================================
+int eval_backward_pawns(const Position& pos) {
+    int score = 0;
+    
+    for (int color = 0; color < 2; color++) {
+        int sign = (color == WHITE) ? -1 : 1;
+        U64 pawns = pos.pieces[color][P];
+        U64 enemy_pawns = pos.pieces[1 - color][P];
+        
+        U64 temp = pawns;
+        while (temp) {
+            int sq = lsb_index(temp);
+            pop_bit(temp, sq);
+            
+            int file = sq % 8;
+            int rank = sq / 8;
+            
+            // Check if pawn is backward
+            bool is_backward = true;
+            
+            // Check adjacent files for friendly pawns behind this one
+            for (int f = std::max(0, file - 1); f <= std::min(7, file + 1); f++) {
+                if (f == file) continue;  // Skip same file
+                
+                for (int r = (color == WHITE ? rank + 1 : 0);
+                     r < (color == WHITE ? 8 : rank); r++) {
+                    if (get_bit(pawns, r * 8 + f)) {
+                        is_backward = false;
+                        break;
+                    }
+                }
+                if (!is_backward) break;
+            }
+            
+            // Check if square in front is attacked by enemy pawn
+            if (is_backward) {
+                int front_sq = (color == WHITE) ? sq - 8 : sq + 8;
+                if (front_sq >= 0 && front_sq < 64) {
+                    // Check if enemy pawn attacks this square
+                    if (color == WHITE) {
+                        if ((front_sq % 8 != 0 && get_bit(enemy_pawns, front_sq + 7)) ||
+                            (front_sq % 8 != 7 && get_bit(enemy_pawns, front_sq + 9))) {
+                            score += sign * 15;  // Backward pawn penalty
+                        }
+                    } else {
+                        if ((front_sq % 8 != 0 && get_bit(enemy_pawns, front_sq - 9)) ||
+                            (front_sq % 8 != 7 && get_bit(enemy_pawns, front_sq - 7))) {
+                            score += sign * 15;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    return score;
+}
+
+// ========================================
+// OUTPOST EVALUATION
+// ========================================
+int eval_outposts(const Position& pos, int color) {
+    int bonus = 0;
+    int enemy = 1 - color;
+    U64 enemy_pawns = pos.pieces[enemy][P];
+    
+    // Check knights on outposts
+    U64 knights = pos.pieces[color][N];
+    while (knights) {
+        int sq = lsb_index(knights);
+        pop_bit(knights, sq);
+        
+        int file = sq % 8;
+        int rank = sq / 8;
+        
+        // Outpost criteria:
+        // 1. On 4th, 5th, or 6th rank (for white)
+        // 2. Cannot be attacked by enemy pawns
+        // 3. Defended by own pawn
+        
+        bool is_outpost_rank = false;
+        if (color == WHITE && rank >= 2 && rank <= 4) is_outpost_rank = true;  // Ranks 6,5,4
+        if (color == BLACK && rank >= 3 && rank <= 5) is_outpost_rank = true;  // Ranks 5,4,3
+        
+        if (is_outpost_rank) {
+            // Check if can be attacked by enemy pawns
+            bool can_be_attacked = false;
+            
+            if (color == WHITE) {
+                // Check if enemy pawns on adjacent files can advance to attack
+                for (int f = std::max(0, file - 1); f <= std::min(7, file + 1); f++) {
+                    if (f == file) continue;
+                    for (int r = rank + 1; r < 8; r++) {
+                        if (get_bit(enemy_pawns, r * 8 + f)) {
+                            can_be_attacked = true;
+                            break;
+                        }
+                    }
+                    if (can_be_attacked) break;
+                }
+            } else {
+                for (int f = std::max(0, file - 1); f <= std::min(7, file + 1); f++) {
+                    if (f == file) continue;
+                    for (int r = 0; r < rank; r++) {
+                        if (get_bit(enemy_pawns, r * 8 + f)) {
+                            can_be_attacked = true;
+                            break;
+                        }
+                    }
+                    if (can_be_attacked) break;
+                }
+            }
+            
+            if (!can_be_attacked) {
+                // Check if defended by own pawn
+                bool defended_by_pawn = false;
+                if (color == WHITE) {
+                    if ((sq % 8 != 0 && get_bit(pos.pieces[WHITE][P], sq + 9)) ||
+                        (sq % 8 != 7 && get_bit(pos.pieces[WHITE][P], sq + 7))) {
+                        defended_by_pawn = true;
+                    }
+                } else {
+                    if ((sq % 8 != 0 && get_bit(pos.pieces[BLACK][P], sq - 9)) ||
+                        (sq % 8 != 7 && get_bit(pos.pieces[BLACK][P], sq - 7))) {
+                        defended_by_pawn = true;
+                    }
+                }
+                
+                if (defended_by_pawn) {
+                    bonus += 40;  // Strong outpost bonus
+                } else {
+                    bonus += 20;  // Weak outpost bonus
+                }
+            }
+        }
+    }
+    
+    return bonus;
 }
 
 int eval_pawns(const Position& pos) {
@@ -2623,7 +2835,7 @@ int quiescence(Position& pos, int alpha, int beta, int ply) {
     // FIXED: Check time every 128 nodes (more aggressive time management)
     if ((nodes_searched & 127) == 0) {
         // Add 5% safety margin to prevent overshooting time limit
-        if (current_time_ms() - start_time > (time_limit * 95 / 100)) {
+        if (current_time_ms() - start_time > (time_limit * 98 / 100)) {
             time_up = true;
             return 0;  // RETURN IMMEDIATELY!
         }
@@ -2708,7 +2920,7 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int ply, bool is_p
     // FIXED: Check time every 128 nodes (more aggressive time management)
     if ((nodes_searched & 127) == 0) {
         // Add 10% safety margin to prevent overshooting time limit
-        if (current_time_ms() - start_time > (time_limit * 95 / 100)) {
+        if (current_time_ms() - start_time > (time_limit * 98 / 100)) {
             time_up = true;
             return 0;  // RETURN IMMEDIATELY!
         }
