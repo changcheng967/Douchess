@@ -1,7 +1,7 @@
 ﻿  douchess.cpp
   正在生成代码
-  8 of 516 functions ( 1.6%) were compiled, the rest were copied from previous compilation.
-    4 functions were new in current compilation
-    30 functions had inline decision re-evaluated but remain unchanged
+  183 of 691 functions (26.5%) were compiled, the rest were copied from previous compilation.
+    174 functions were new in current compilation
+    72 functions had inline decision re-evaluated but remain unchanged
   已完成代码的生成
   Douchess.vcxproj -> C:\Users\chang\source\repos\Douchess\x64\Release\Douchess.exe

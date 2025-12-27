@@ -16,6 +16,9 @@
 #include <cstring>
 #include <sstream>
 #include <random>
+#include <atomic>
+#include <memory>
+#include <mutex>
 
 // ========================================
 // INSERT AT TOP: Time Management & Constants (Windows Compatible)
@@ -167,6 +170,30 @@ int halfmove_clock = 0;
 // Missing variable declarations
 
 // Countermove heuristic - removed due to broken implementation
+
+// ========================================
+// LAZY SMP (MULTI-THREADING)
+// ========================================
+const int MAX_THREADS = 4;
+std::atomic<bool> stop_search(false);
+std::atomic<int> best_depth(0);
+std::atomic<int> best_worker_score(-INFINITY_SCORE);
+Move best_move_found;
+std::mutex search_mutex;
+
+struct ThreadData {
+    Position pos;
+    int depth;
+    int alpha;
+    int beta;
+    int ply;
+    bool is_pv_node;
+    int thread_id;
+    long long nodes;
+};
+
+std::vector<std::thread> search_threads;
+std::vector<ThreadData> thread_data;
 
 // Function declarations for tactical analysis
 int detect_hanging_pieces(const Position& pos, int color);
@@ -1383,63 +1410,63 @@ void run_perft_tests() {
 // Piece values (centipawns)
 const int piece_values[6] = {100, 320, 333, 500, 900, 20000}; // P, N, B, R, Q, K - Tuned values
 
-// Pawn tables - encourage advancing pawns
+// Pawn tables - encourage advancing pawns (TUNED)
 static const int pawn_table[64] = {
     0,  0,  0,  0,  0,  0,  0,  0,
-    5, 10, 10,-20,-20, 10, 10,  5,
-    5, -5,-10,  0,  0,-10, -5,  5,
-    0,  0,  0, 20, 20,  0,  0,  0,
-    5,  5, 10, 25, 25, 10,  5,  5,
-   10, 10, 20, 30, 30, 20, 10, 10,
-   50, 50, 50, 50, 50, 50, 50, 50,
+    5, 10, 10,-15,-15, 10, 10,  5,
+    5, -5,-10,  5,  5,-10, -5,  5,
+    0,  0,  5, 25, 25,  5,  0,  0,
+    5,  5, 15, 30, 30, 15,  5,  5,
+   15, 15, 25, 35, 35, 25, 15, 15,
+   60, 60, 60, 60, 60, 60, 60, 60,
     0,  0,  0,  0,  0,  0,  0,  0
 };
 
-// Knight tables - encourage centralization
+// Knight tables - encourage centralization (TUNED)
 static const int knight_table[64] = {
    -50,-40,-30,-30,-30,-30,-40,-50,
-   -40,-20,  0,  5,  5,  0,-20,-40,
-   -30,  5, 10, 15, 15, 10,  5,-30,
-   -30,  0, 15, 20, 20, 15,  0,-30,
+   -40,-20,  0,  8,  8,  0,-20,-40,
+   -30,  8, 15, 20, 20, 15,  8,-30,
+   -30,  5, 20, 25, 25, 20,  5,-30,
+   -30,  8, 20, 25, 25, 20,  8,-30,
    -30,  5, 15, 20, 20, 15,  5,-30,
-   -30,  0, 10, 15, 15, 10,  0,-30,
    -40,-20,  0,  0,  0,  0,-20,-40,
    -50,-40,-30,-30,-30,-30,-40,-50
 };
 
-// Bishop tables - encourage diagonals and center
+// Bishop tables - encourage diagonals and center (TUNED)
 static const int bishop_table[64] = {
    -20,-10,-10,-10,-10,-10,-10,-20,
-   -10,  5,  0,  0,  0,  0,  5,-10,
-   -10, 10, 10, 10, 10, 10, 10,-10,
-   -10,  0, 10, 10, 10, 10,  0,-10,
-   -10,  5,  5, 10, 10,  5,  5,-10,
-   -10,  0,  5, 10, 10,  5,  0,-10,
-   -10,  0,  0, 10, 10,  0,  0,-10,
+   -10,  8,  5,  5,  5,  5,  8,-10,
+   -10,  8, 12, 15, 15, 12,  8,-10,
+   -10,  5, 15, 20, 20, 15,  5,-10,
+   -10,  8, 15, 20, 20, 15,  8,-10,
+   -10,  5, 12, 15, 15, 12,  5,-10,
+   -10,  5,  5, 12, 12,  5,  5,-10,
    -20,-10,-10, -5, -5,-10,-10,-20
 };
 
-// Rook tables - encourage open files and 7th rank
+// Rook tables - encourage open files and 7th rank (TUNED)
 static const int rook_table[64] = {
-    0,  0,  0,  5,  5,  0,  0,  0,
-   -5,  0,  0,  0,  0,  0,  0, -5,
-   -5,  0,  0,  0,  0,  0,  0, -5,
-   -5,  0,  0,  0,  0,  0,  0, -5,
-   -5,  0,  0,  0,  0,  0,  0, -5,
-   -5,  0,  0,  0,  0,  0,  0, -5,
-    5, 10, 10, 10, 10, 10, 10,  5,
+    0,  0,  0,  8,  8,  0,  0,  0,
+   -5,  5,  5,  5,  5,  5,  5, -5,
+   -5,  5,  8,  8,  8,  8,  5, -5,
+   -5,  5,  8, 10, 10,  8,  5, -5,
+   -5,  5,  8, 10, 10,  8,  5, -5,
+   -5,  5,  8,  8,  8,  8,  5, -5,
+    8, 12, 12, 15, 15, 12, 12,  8,
     0,  0,  0,  0,  0,  0,  0,  0
 };
 
-// Queen tables - encourage center and mobility
+// Queen tables - encourage center and mobility (TUNED)
 static const int queen_table[64] = {
    -20,-10,-10, -5, -5,-10,-10,-20,
-   -10,  0,  0,  0,  0,  0,  0,-10,
-   -10,  0,  5,  5,  5,  5,  0,-10,
-    -5,  0,  5,  5,  5,  5,  0, -5,
-     -5,  0,  5,  5,  5,  5,  0, -5,
-   -10,  0,  5,  5,  5,  5,  0,-10,
-   -10,  0,  0,  0,  0,  0,  0,-10,
+   -10,  5,  5,  5,  5,  5,  5,-10,
+   -10,  5, 10, 12, 12, 10,  5,-10,
+    -5,  5, 12, 15, 15, 12,  5, -5,
+     -5,  5, 12, 15, 15, 12,  5, -5,
+   -10,  5, 10, 12, 12, 10,  5,-10,
+   -10,  5,  5,  5,  5,  5,  5,-10,
    -20,-10,-10, -5, -5,-10,-10,-20
 };
 
@@ -1467,6 +1494,7 @@ int eval_rook_on_seventh(const Position& pos, int color);
 int eval_connected_rooks(const Position& pos, int color);
 int eval_backward_pawns(const Position& pos);
 int eval_outposts(const Position& pos, int color);
+int eval_piece_activity(const Position& pos, int color);
 
 // ========================================
 // INSERT: Tapered Evaluation (Middlegame + Endgame)
@@ -1603,7 +1631,7 @@ int evaluate_position_tapered(const Position& pos) {
         }
         
         // FIX: Only add mobility to MIDDLEGAME score (not both!)
-        mg_score += sign * (eval_mobility(pos, color) / 3);  // Stronger mobility evaluation
+        mg_score += sign * (eval_mobility(pos, color) / 2);  // Stronger mobility evaluation
         
         // FIX: Only add king safety to MIDDLEGAME score
         mg_score += sign * eval_king_safety(pos, color);
@@ -1614,8 +1642,8 @@ int evaluate_position_tapered(const Position& pos) {
         // Hanging piece detection
         mg_score -= sign * detect_hanging_pieces(pos, color) * 2;  // ✅ DOUBLE the penalty!
         
-        // Threat detection
-        mg_score -= sign * detect_threats(pos, color) / 3;
+        // Threat detection - FIXED: Remove division for stronger evaluation
+        mg_score -= sign * detect_threats(pos, color);
         
         // Tactical pattern detection
         mg_score += sign * detect_tactical_patterns(pos, color);
@@ -1646,6 +1674,7 @@ int evaluate_position_tapered(const Position& pos) {
     mg_score += eval_connected_rooks(pos, WHITE) - eval_connected_rooks(pos, BLACK);
     mg_score += eval_outposts(pos, WHITE) - eval_outposts(pos, BLACK);
     mg_score += eval_backward_pawns(pos);
+    mg_score += eval_piece_activity(pos, WHITE) - eval_piece_activity(pos, BLACK);
     
     // Calculate phase and interpolate
     int phase = calculate_phase(pos);
@@ -1943,6 +1972,57 @@ int eval_outposts(const Position& pos, int color) {
     return bonus;
 }
 
+// ========================================
+// PIECE ACTIVITY EVALUATION
+// ========================================
+int eval_piece_activity(const Position& pos, int color) {
+    int bonus = 0;
+    int enemy = 1 - color;
+    
+    // Rooks on open/semi-open files
+    U64 rooks = pos.pieces[color][R];
+    while (rooks) {
+        int sq = lsb_index(rooks);
+        pop_bit(rooks, sq);
+        
+        int file = sq % 8;
+        bool open_file = true;
+        bool semi_open = true;
+        
+        // Check if file has pawns
+        for (int rank = 0; rank < 8; rank++) {
+            if (get_bit(pos.pieces[color][P], rank * 8 + file)) {
+                open_file = false;
+                semi_open = false;
+                break;
+            }
+            if (get_bit(pos.pieces[enemy][P], rank * 8 + file)) {
+                open_file = false;
+            }
+        }
+        
+        if (open_file) bonus += 30;      // Rook on open file
+        else if (semi_open) bonus += 15; // Rook on semi-open file
+    }
+    
+    // Bishops on long diagonals
+    U64 bishops = pos.pieces[color][B];
+    while (bishops) {
+        int sq = lsb_index(bishops);
+        pop_bit(bishops, sq);
+        
+        // Check if bishop is on long diagonal (a1-h8 or a8-h1)
+        int rank = sq / 8;
+        int file = sq % 8;
+        
+        if (rank == file || rank + file == 7) {
+            bonus += 15;  // Bishop on long diagonal
+        }
+    }
+    
+    return bonus;
+}
+
 int eval_pawns(const Position& pos) {
     int score = 0;
     U64 wp = pos.pieces[WHITE][P], bp = pos.pieces[BLACK][P];
@@ -2060,12 +2140,38 @@ int detect_hanging_pieces(const Position& pos, int color) {
                 // Check if defended by king
                 if (king_attacks[sq] & pos.pieces[color][K]) defenders++;
                 
-                // If undefended or under-defended, apply penalty
-                if (defenders == 0) {
-                    // Hanging piece - HUGE penalty!
+                // Count attackers
+                int attackers_count = 0;
+                
+                // Count enemy pieces attacking this square
+                if (color == WHITE) {
+                    // Check enemy pawns
+                    if (sq % 8 != 0 && sq - 9 >= 0 && get_bit(pos.pieces[BLACK][P], sq - 9)) attackers_count++;
+                    if (sq % 8 != 7 && sq - 7 >= 0 && get_bit(pos.pieces[BLACK][P], sq - 7)) attackers_count++;
+                } else {
+                    if (sq % 8 != 0 && sq + 7 < 64 && get_bit(pos.pieces[WHITE][P], sq + 7)) attackers_count++;
+                    if (sq % 8 != 7 && sq + 9 < 64 && get_bit(pos.pieces[WHITE][P], sq + 9)) attackers_count++;
+                }
+                
+                // Count enemy knights
+                U64 enemy_knight_attackers = knight_attacks[sq] & pos.pieces[enemy][N];
+                attackers_count += count_bits(enemy_knight_attackers);
+                
+                // Count enemy bishops/queens
+                U64 enemy_bishop_attackers = get_bishop_attacks(sq, pos.occupancies[2]) &
+                                              (pos.pieces[enemy][B] | pos.pieces[enemy][Q]);
+                attackers_count += count_bits(enemy_bishop_attackers);
+                
+                // Count enemy rooks/queens
+                U64 enemy_rook_attackers = get_rook_attacks(sq, pos.occupancies[2]) &
+                                            (pos.pieces[enemy][R] | pos.pieces[enemy][Q]);
+                attackers_count += count_bits(enemy_rook_attackers);
+                
+                // If more attackers than defenders, piece is hanging
+                if (attackers_count > defenders) {
                     penalty += piece_values[piece];
-                } else if (defenders == 1) {
-                    // Weakly defended - smaller penalty
+                } else if (attackers_count == defenders && attackers_count > 0) {
+                    // Equal attackers/defenders - use SEE
                     penalty += piece_values[piece] / 4;
                 }
             }
@@ -2316,11 +2422,19 @@ int eval_king_safety(const Position& pos, int color) {
     int king_rank = king_sq / 8;
     if (color == WHITE) {
         if (king_rank < 7) {  // Not on rank 1
-            score -= (7 - king_rank) * 50;  // -50 per rank away from back rank
+            // Only penalize in middlegame
+            int phase = calculate_phase(pos);
+            if (phase > 12) {  // Middlegame only
+                score -= (7 - king_rank) * 20;  // Reduced from 50 to 20
+            }
         }
     } else {
         if (king_rank > 0) {  // Not on rank 8
-            score -= king_rank * 50;  // -50 per rank away from back rank
+            // Only penalize in middlegame
+            int phase = calculate_phase(pos);
+            if (phase > 12) {  // Middlegame only
+                score -= king_rank * 20;  // Reduced from 50 to 20
+            }
         }
     }
     
@@ -2835,7 +2949,7 @@ int quiescence(Position& pos, int alpha, int beta, int ply) {
     // FIXED: Check time every 128 nodes (more aggressive time management)
     if ((nodes_searched & 127) == 0) {
         // Add 5% safety margin to prevent overshooting time limit
-        if (current_time_ms() - start_time > (time_limit * 98 / 100)) {
+        if (current_time_ms() - start_time > (time_limit * 99 / 100)) {
             time_up = true;
             return 0;  // RETURN IMMEDIATELY!
         }
@@ -2920,7 +3034,7 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int ply, bool is_p
     // FIXED: Check time every 128 nodes (more aggressive time management)
     if ((nodes_searched & 127) == 0) {
         // Add 10% safety margin to prevent overshooting time limit
-        if (current_time_ms() - start_time > (time_limit * 98 / 100)) {
+        if (current_time_ms() - start_time > (time_limit * 99 / 100)) {
             time_up = true;
             return 0;  // RETURN IMMEDIATELY!
         }
@@ -3067,17 +3181,18 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int ply, bool is_p
             continue;
         }
         
-        // LMR (Late Move Reductions) - Critical for search efficiency
+        // LMR (Late Move Reductions) - Improved for better search efficiency
         int reduction = 0;
         
         // LMR conditions: depth >= 3, not first few moves, not in check, not capture/promotion
         if (depth >= 3 && i >= 4 && !in_check && !move.is_capture() && !move.get_promo()) {
-            // Base reduction
-            reduction = 1;
+            // Base reduction based on depth
+            reduction = 1 + (depth / 6);  // Increase base reduction with depth
             
-            // Increase reduction for later moves
-            if (i >= 8) reduction = 2;
-            if (i >= 16) reduction = 3;
+            // Increase reduction for later moves (more aggressive)
+            if (i >= 8) reduction += 1;
+            if (i >= 16) reduction += 1;
+            if (i >= 32) reduction += 1;
             
             // Reduce less in PV nodes
             if (is_pv_node) reduction = std::max(0, reduction - 1);
@@ -3087,6 +3202,16 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int ply, bool is_p
                 killer_moves[1][ply].move == move.move) {
                 reduction = std::max(0, reduction - 1);
             }
+            
+            // Reduce less for history moves
+            int piece = move.get_piece();
+            int to = move.get_to();
+            if (history_moves[piece][to] > 1000) {
+                reduction = std::max(0, reduction - 1);
+            }
+            
+            // Cap maximum reduction
+            reduction = std::min(reduction, depth - 2);
         }
         
         // Make the move
@@ -3198,10 +3323,39 @@ void print_move_uci(int move_int) {
 // REPLACE: Root Searcher (FIXED with PV Table)
 // ========================================
 
+// ========================================
+// LAZY SMP SEARCH FUNCTION
+// ========================================
+void lazy_smp_worker(int thread_id) {
+    while (!stop_search) {
+        // Wait for work
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        
+        if (thread_data[thread_id].depth == 0) continue;
+        
+        ThreadData& data = thread_data[thread_id];
+        int score = pvs_search(data.pos, data.depth, data.alpha, data.beta, data.ply, data.is_pv_node);
+        
+        // Update global best if this thread found something better
+        if (score > best_worker_score.load() && data.depth >= best_depth.load()) {
+            std::lock_guard<std::mutex> lock(search_mutex);
+            if (score > best_worker_score.load() && data.depth >= best_depth.load()) {
+                best_worker_score.store(score);
+                best_depth.store(data.depth);
+            }
+        }
+        
+        data.depth = 0; // Mark as done
+    }
+}
+
 Move search_position(Position& pos) {
     time_up = false;
     nodes_searched = 0;
     start_time = current_time_ms();
+    stop_search.store(false);
+    best_depth.store(0);
+    best_worker_score.store(-INFINITY_SCORE);
     
     // Clear PV table
     memset(pv_table, 0, sizeof(pv_table));
@@ -3213,6 +3367,19 @@ Move search_position(Position& pos) {
     Move best_move;
     bool found_move = false;
     int prev_score = 0;
+    
+    // Initialize thread data
+    thread_data.resize(MAX_THREADS);
+    for (int i = 0; i < MAX_THREADS; i++) {
+        thread_data[i].depth = 0;
+        thread_data[i].nodes = 0;
+    }
+    
+    // Start worker threads
+    search_threads.resize(MAX_THREADS);
+    for (int i = 0; i < MAX_THREADS; i++) {
+        search_threads[i] = std::thread(lazy_smp_worker, i);
+    }
     
     for (int depth = 1; depth <= MAX_DEPTH && !time_up; depth++) {
         int alpha, beta;
@@ -3234,8 +3401,6 @@ Move search_position(Position& pos) {
         // Generate moves ONCE before the loop
         MoveList moves = generate_legal_moves(pos);
         
-        // Debug output removed from production code
-        
         if (moves.moves.empty()) {
             // No moves available - game over
             std::cout << "info string No legal moves found - game over" << std::endl;
@@ -3252,6 +3417,19 @@ Move search_position(Position& pos) {
         probe_tt(pos.hash_key, depth, alpha, beta, dummy_score, tt_move, 0);
         sort_moves_enhanced(pos, moves.moves, tt_move, 0);
         
+        // Lazy SMP: Start worker threads with reduced depth
+        if (depth >= 3 && MAX_THREADS > 1) {
+            for (int i = 1; i < MAX_THREADS; i++) {
+                thread_data[i].pos = pos;
+                thread_data[i].depth = depth - 1; // Workers search one ply less
+                thread_data[i].alpha = alpha;
+                thread_data[i].beta = beta;
+                thread_data[i].ply = 1;
+                thread_data[i].is_pv_node = false;
+                thread_data[i].thread_id = i;
+            }
+        }
+        
         for (const auto& move : moves.moves) {
             // ADDED: Check time at root level
             if (current_time_ms() - start_time > time_limit) {
@@ -3261,6 +3439,13 @@ Move search_position(Position& pos) {
             
             BoardState state = make_move(pos, move);
             int score = -pvs_search(pos, depth - 1, -beta, -alpha, 1, true);
+            
+            // Check if any worker thread found a better score
+            int worker_score = best_worker_score.load();
+            if (worker_score > score) {
+                score = worker_score;
+            }
+            
             unmake_move(pos, move, state);  // Always unmake!
 
             if (time_up) break;
@@ -3322,7 +3507,6 @@ Move search_position(Position& pos) {
             
             // FIX: Stricter mate score detection
             // Only treat as mate if score is VERY close to MATE_SCORE
-            // FIX: Only treat as mate if score is VERY close to MATE_SCORE
             if (best_score >= MATE_SCORE - 10) {
                 int mate_in = (MATE_SCORE - best_score + 1) / 2;
                 std::cout << "info depth " << depth << " score mate " << mate_in
@@ -3364,6 +3548,14 @@ Move search_position(Position& pos) {
         // if (best_score >= MATE_SCORE - 10 || best_score <= -MATE_SCORE + 10) {
         //     break;
         // }
+    }
+    
+    // Stop worker threads
+    stop_search.store(true);
+    for (int i = 0; i < MAX_THREADS; i++) {
+        if (search_threads[i].joinable()) {
+            search_threads[i].join();
+        }
     }
     
     // Add PV fallback code if PV is empty but we found a move
