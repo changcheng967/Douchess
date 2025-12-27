@@ -174,30 +174,8 @@ int halfmove_clock = 0;
 // ========================================
 // LAZY SMP (MULTI-THREADING)
 // ========================================
-const int MAX_THREADS = 4;
-std::atomic<bool> stop_search(false);
-std::atomic<int> best_depth(0);
-std::atomic<int> best_worker_score(-INFINITY_SCORE);
-Move best_move_found;
-std::mutex search_mutex;
-
 // Countermove heuristic
 Move countermoves[6][64];  // [piece][to_square]
-
-struct ThreadData {
-    Position pos;
-    int depth = 0;
-    int alpha = 0;
-    int beta = 0;
-    int ply = 0;
-    bool is_pv_node = false;
-    int thread_id = 0;
-    long long nodes = 0;
-};
-
-std::vector<std::thread> search_threads;
-std::vector<ThreadData> thread_data;
-
 // Function declarations for tactical analysis
 int detect_hanging_pieces(const Position& pos, int color);
 int detect_threats(const Position& pos, int color);
