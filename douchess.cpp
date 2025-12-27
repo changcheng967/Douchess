@@ -2943,18 +2943,6 @@ int score_move_enhanced(const Position& pos, const Move& move, const Move& tt_mo
         if (killer_moves[1][ply].move == move.move) return 19000;
     }
     
-    // Countermove bonus
-    if (ply > 0) {
-        Move prev_move = pv_table[ply - 1][0];
-        if (prev_move.move != 0) {
-            int prev_piece = prev_move.get_piece();
-            int prev_to = prev_move.get_to();
-            if (countermoves[prev_piece][prev_to].move == move.move) {
-                return 18000;  // Just below killer moves
-            }
-        }
-    }
-    
     // History heuristic
     int piece = move.get_piece();
     int to = move.get_to();
