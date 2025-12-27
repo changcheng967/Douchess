@@ -2708,7 +2708,7 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int ply, bool is_p
     // FIXED: Check time every 128 nodes (more aggressive time management)
     if ((nodes_searched & 127) == 0) {
         // Add 10% safety margin to prevent overshooting time limit
-        if (current_time_ms() - start_time > (time_limit * 90 / 100)) {
+        if (current_time_ms() - start_time > (time_limit * 95 / 100)) {
             time_up = true;
             return 0;  // RETURN IMMEDIATELY!
         }
