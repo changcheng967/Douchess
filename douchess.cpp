@@ -3294,7 +3294,8 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int ply, bool is_p
             // Cap reduction at depth - 2 (never reduce below depth 1)
             reduction = std::min(reduction, depth - 2);
             
-            // Duplicate code removed - already handled above
+            // Note: All LMR reduction adjustments (PV, killer, history, depth cap)
+            // are handled in this block; no additional reduction logic is needed below.
         }
         
         // Make the move
