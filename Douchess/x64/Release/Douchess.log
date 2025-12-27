@@ -1,2 +1,7 @@
 ﻿  douchess.cpp
-C:\Users\chang\source\repos\Douchess\douchess.cpp(1607,28): error C3861: “eval_development”: 找不到标识符
+  正在生成代码
+  7 of 512 functions ( 1.4%) were compiled, the rest were copied from previous compilation.
+    3 functions were new in current compilation
+    22 functions had inline decision re-evaluated but remain unchanged
+  已完成代码的生成
+  Douchess.vcxproj -> C:\Users\chang\source\repos\Douchess\x64\Release\Douchess.exe

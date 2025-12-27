@@ -1462,6 +1462,7 @@ static const int king_table[64] = {
 int eval_pawns(const Position& pos);
 int eval_king_safety(const Position& pos, int color);
 int eval_mobility(const Position& pos, int color);
+int eval_development(const Position& pos, int color);
 
 // ========================================
 // INSERT: Tapered Evaluation (Middlegame + Endgame)
