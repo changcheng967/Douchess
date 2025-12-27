@@ -1598,10 +1598,13 @@ int evaluate_position_tapered(const Position& pos) {
         }
         
         // FIX: Only add mobility to MIDDLEGAME score (not both!)
-        mg_score += sign * (eval_mobility(pos, color) / 10);  // Divide by 10 to reduce impact
+        mg_score += sign * (eval_mobility(pos, color) / 5);  // Divide by 5 to increase impact
         
         // FIX: Only add king safety to MIDDLEGAME score
         mg_score += sign * eval_king_safety(pos, color);
+        
+        // ADD: Development evaluation (prevents 2...Nb4 type moves)
+        mg_score += sign * eval_development(pos, color);
         
         // Hanging piece detection
         mg_score -= sign * detect_hanging_pieces(pos, color) * 2;  // ✅ DOUBLE the penalty!
@@ -1651,10 +1654,87 @@ int evaluate_position_tapered(const Position& pos) {
 // ========================================
 const int passed_pawn_bonus[8] = { 0, 10, 30, 50, 75, 100, 150, 200 };
 
+// ========================================
+// COMPLETE PAWN STRUCTURE EVALUATION
+// ========================================
+
+// Add these functions BEFORE eval_pawns():
+
+int eval_doubled_pawns(const Position& pos) {
+    int score = 0;
+    
+    for (int color = 0; color < 2; color++) {
+        int sign = (color == WHITE) ? -1 : 1;
+        U64 pawns = pos.pieces[color][P];
+        
+        for (int file = 0; file < 8; file++) {
+            int pawn_count = 0;
+            for (int rank = 0; rank < 8; rank++) {
+                if (get_bit(pawns, rank * 8 + file)) {
+                    pawn_count++;
+                }
+            }
+            
+            if (pawn_count >= 2) {
+                score += sign * 25 * (pawn_count - 1);  // -25 per doubled pawn
+            }
+        }
+    }
+    
+    return score;
+}
+
+int eval_isolated_pawns(const Position& pos) {
+    int score = 0;
+    
+    for (int color = 0; color < 2; color++) {
+        int sign = (color == WHITE) ? -1 : 1;
+        U64 pawns = pos.pieces[color][P];
+        
+        for (int file = 0; file < 8; file++) {
+            bool has_pawn = false;
+            for (int rank = 0; rank < 8; rank++) {
+                if (get_bit(pawns, rank * 8 + file)) {
+                    has_pawn = true;
+                    break;
+                }
+            }
+            
+            if (has_pawn) {
+                // Check adjacent files
+                bool has_neighbor = false;
+                if (file > 0) {
+                    for (int rank = 0; rank < 8; rank++) {
+                        if (get_bit(pawns, rank * 8 + (file - 1))) {
+                            has_neighbor = true;
+                            break;
+                        }
+                    }
+                }
+                if (file < 7 && !has_neighbor) {
+                    for (int rank = 0; rank < 8; rank++) {
+                        if (get_bit(pawns, rank * 8 + (file + 1))) {
+                            has_neighbor = true;
+                            break;
+                        }
+                    }
+                }
+                
+                if (!has_neighbor) {
+                    score += sign * 20;  // -20 per isolated pawn
+                }
+            }
+        }
+    }
+    
+    return score;
+}
+
 int eval_pawns(const Position& pos) {
     int score = 0;
     U64 wp = pos.pieces[WHITE][P], bp = pos.pieces[BLACK][P];
     
+    // Existing passed pawn code...
     // Check White Passed Pawns
     U64 temp_wp = wp;
     while(temp_wp) {
@@ -1714,6 +1794,10 @@ int eval_pawns(const Position& pos) {
             score -= passed_pawn_bonus[rank_bonus];
         }
     }
+    
+    // ADD THESE LINES:
+    score += eval_doubled_pawns(pos);
+    score += eval_isolated_pawns(pos);
     
     return score;  // Don't flip sign here!
 }
@@ -1952,6 +2036,57 @@ int detect_trapped_pieces(const Position& pos, int color) {
     return penalty;
 }
 
+
+// ========================================
+// DEVELOPMENT EVALUATION (CRITICAL FIX!)
+// ========================================
+int eval_development(const Position& pos, int color) {
+    int score = 0;
+    int phase = calculate_phase(pos);
+    
+    // Only apply in opening/early middlegame
+    if (phase < 18) {
+        // Penalty for pieces on starting squares
+        if (color == WHITE) {
+            // Knights
+            if (get_bit(pos.pieces[WHITE][N], b1)) score -= 10;
+            if (get_bit(pos.pieces[WHITE][N], g1)) score -= 10;
+            
+            // Bishops
+            if (get_bit(pos.pieces[WHITE][B], c1)) score -= 10;
+            if (get_bit(pos.pieces[WHITE][B], f1)) score -= 10;
+            
+            // Rooks
+            if (get_bit(pos.pieces[WHITE][R], a1)) score -= 5;
+            if (get_bit(pos.pieces[WHITE][R], h1)) score -= 5;
+            
+            // Queen
+            if (get_bit(pos.pieces[WHITE][Q], d1)) score -= 5;
+        } else {
+            // Similar for black
+            if (get_bit(pos.pieces[BLACK][N], b8)) score -= 10;
+            if (get_bit(pos.pieces[BLACK][N], g8)) score -= 10;
+            if (get_bit(pos.pieces[BLACK][B], c8)) score -= 10;
+            if (get_bit(pos.pieces[BLACK][B], f8)) score -= 10;
+            if (get_bit(pos.pieces[BLACK][R], a8)) score -= 5;
+            if (get_bit(pos.pieces[BLACK][R], h8)) score -= 5;
+            if (get_bit(pos.pieces[BLACK][Q], d8)) score -= 5;
+        }
+        
+        // Bonus for castling
+        if (color == WHITE) {
+            if (!(pos.castling_rights & 3)) {  // Already castled
+                score += 30;
+            }
+        } else {
+            if (!(pos.castling_rights & 12)) {
+                score += 30;
+            }
+        }
+    }
+    
+    return score;
+}
 
 // ========================================
 // FIXED KING SAFETY EVALUATION
@@ -2486,8 +2621,8 @@ void sort_moves_enhanced(const Position& pos, std::vector<Move>& moves, const Mo
 int quiescence(Position& pos, int alpha, int beta, int ply) {
     // FIXED: Check time every 128 nodes (more aggressive time management)
     if ((nodes_searched & 127) == 0) {
-        // Add 10% safety margin to prevent overshooting time limit
-        if (current_time_ms() - start_time > (time_limit * 90 / 100)) {
+        // Add 5% safety margin to prevent overshooting time limit
+        if (current_time_ms() - start_time > (time_limit * 95 / 100)) {
             time_up = true;
             return 0;  // RETURN IMMEDIATELY!
         }
