@@ -66,6 +66,18 @@ const int EVAL_CLAMP_MAX = 5000;
 const int EVAL_CLAMP_MIN = -5000;
 const int ASPIRATION_WINDOW = 25;  // Narrow window for speed
 
+// Phase 1: Search Optimizations
+const int MULTI_PV = 3;  // Multi-PV search for better move ordering
+const int PROBCUT_MARGIN = 200;  // Probcut pruning margin
+const int SINGULAR_MARGIN = 2;   // Singular extension margin
+
+// Phase 4: Adaptive Time Management
+int calculate_time_for_move(int time_left, int increment, int moves_to_go) {
+    int base_time = time_left / std::max(moves_to_go, 20);
+    int allocated = base_time + static_cast<int>(increment * 0.75);
+    return std::min(allocated, 2000); // Cap at 2 seconds
+}
+
 // Piece types
 enum { P, N, B, R, Q, K };
 
@@ -168,6 +180,15 @@ std::vector<U64> position_history;
 int halfmove_clock = 0;
 
 // Missing variable declarations
+std::atomic<bool> stop_search{false};
+std::atomic<int> best_depth{0};
+std::atomic<int> best_worker_score{-INFINITY_SCORE};
+const int MAX_THREADS = 4;
+struct ThreadData {
+    int depth;
+    long long nodes;
+};
+std::vector<ThreadData> thread_data;
 
 // Countermove heuristic - removed due to broken implementation
 
@@ -189,6 +210,12 @@ int pv_length[MAX_PLY];
 // Killer Moves & History
 Move killer_moves[2][MAX_DEPTH];
 int history_moves[6][64];
+
+// Phase 3: Capture History Heuristic
+int capture_history[6][64][6]; // [piece][to][captured_piece]
+
+// Phase 3: Continuation History (2-ply)
+int continuation_history[6][64][6][64]; // [prev_piece][prev_to][piece][to]
 
 // Transposition Table
 const int TT_SIZE = 1 << 24;  // 16 million entries (~512 MB) - Better for 1 sec/move
@@ -280,6 +307,9 @@ void init_zobrist_keys() {
         if (bitboard == 0) return -1;
         return __builtin_ctzll(bitboard);
     }
+    
+    // Phase 7: BMI2 optimizations removed - implementation was broken
+    // TODO: Re-implement with proper magic bitboards
 #endif
 
 inline int get_bit(U64 bitboard, int square) { return (int)((bitboard >> square) & 1ULL); }
@@ -2546,29 +2576,38 @@ int eval_mobility(const Position& pos, int color) {
     int score = 0;
     U64 occ = pos.occupancies[2];
     
-    // Knight mobility
+    // Phase 2: Improved mobility weights
+    // Knight mobility - increased from 4 to 5
     U64 knights = pos.pieces[color][N];
     while (knights) {
         int sq = lsb_index(knights);
         knights ^= (1ULL << sq); // Use XOR instead of pop_bit to avoid modifying original
         if (sq < 0 || sq >= 64) continue; // Bounds check
-        score += count_bits(knight_attacks[sq] & ~pos.occupancies[color]) * 4;
+        score += count_bits(knight_attacks[sq] & ~pos.occupancies[color]) * 5;
     }
     
-    // Bishop mobility
+    // Bishop mobility - increased from 3 to 4
     U64 bishops = pos.pieces[color][B];
     while (bishops) {
         int sq = lsb_index(bishops);
         bishops ^= (1ULL << sq); // Use XOR instead of pop_bit to avoid modifying original
-        score += count_bits(get_bishop_attacks(sq, occ) & ~pos.occupancies[color]) * 3;
+        score += count_bits(get_bishop_attacks(sq, occ) & ~pos.occupancies[color]) * 4;
     }
     
-    // Rook mobility
+    // Rook mobility - increased from 2 to 3
     U64 rooks = pos.pieces[color][R];
     while (rooks) {
         int sq = lsb_index(rooks);
         rooks ^= (1ULL << sq); // Use XOR instead of pop_bit to avoid modifying original
-        score += count_bits(get_rook_attacks(sq, occ) & ~pos.occupancies[color]) * 2;
+        score += count_bits(get_rook_attacks(sq, occ) & ~pos.occupancies[color]) * 3;
+    }
+    
+    // Queen mobility - increased from 1 to 2
+    U64 queens = pos.pieces[color][Q];
+    while (queens) {
+        int sq = lsb_index(queens);
+        queens ^= (1ULL << sq); // Use XOR instead of pop_bit to avoid modifying original
+        score += count_bits(get_queen_attacks(sq, occ) & ~pos.occupancies[color]) * 2;
     }
     
     return score;
@@ -2587,15 +2626,44 @@ void clear_history() {
     memset(killer_moves, 0, sizeof(killer_moves));
     memset(history_moves, 0, sizeof(history_moves));
     memset(countermoves, 0, sizeof(countermoves));  // ✅ ADD THIS
+    memset(continuation_history, 0, sizeof(continuation_history));
+}
+
+// Add decay to continuation history periodically
+void decay_continuation_history() {
+    for (int i = 0; i < 6; i++)
+        for (int j = 0; j < 64; j++)
+            for (int k = 0; k < 6; k++)
+                for (int l = 0; l < 64; l++)
+                    continuation_history[i][j][k][l] /= 2;
 }
 
 // Write to TT with ply parameter for mate score adjustment (FIXED)
 void record_tt(U64 hash, int score, int flag, int depth, Move move, int ply) {
     int index = hash % TT_SIZE;
     
-    // FIX: Only store if this entry is deeper or doesn't exist
-    if (TTable[index].key == hash && TTable[index].depth > depth) {
-        return; // Don't overwrite deeper entries
+    // Phase 5: Two-tier TT replacement scheme
+    TTEntry& entry = TTable[index];
+    
+    // Always replace if:
+    // 1. Empty slot
+    // 2. Same position
+    // 3. Much deeper search
+    // 4. Different type (prefer EXACT over bounds)
+    bool should_replace = false;
+    
+    if (entry.key == 0) {
+        should_replace = true; // Empty slot
+    } else if (entry.key == hash) {
+        should_replace = true; // Same position
+    } else if (entry.depth + 4 < depth) {
+        should_replace = true; // Much deeper search
+    } else if (entry.flag != TT_EXACT && flag == TT_EXACT) {
+        should_replace = true; // Prefer EXACT over bounds
+    }
+    
+    if (!should_replace) {
+        return; // Don't overwrite
     }
     
     // FIXED: Correct mate score adjustment
@@ -2617,6 +2685,11 @@ void record_tt(U64 hash, int score, int flag, int depth, Move move, int ply) {
 
 // Read from TT with ply parameter for mate score adjustment (FIXED)
 bool probe_tt(U64 hash, int depth, int alpha, int beta, int& score, Move& best_move, int ply) {
+    // Phase 7: Prefetch TT entries
+    #ifdef __GNUC__
+    __builtin_prefetch(&TTable[hash % TT_SIZE]);
+    #endif
+    
     int index = hash % TT_SIZE;
     TTEntry& entry = TTable[index];
     
@@ -2923,11 +2996,51 @@ int see_capture(const Position& pos, const Move& move) {
 int score_move_enhanced(const Position& pos, const Move& move, const Move& tt_move, int ply = 0) {
     if (move.move == tt_move.move) return 100000; // TT move highest priority
     
+    // Countermove bonus
+    if (ply > 0) {
+        // Get previous move from PV table
+        Move prev_move = pv_table[ply - 1][0];
+        if (prev_move.move != 0) {
+            int prev_piece = prev_move.get_piece();
+            int prev_to = prev_move.get_to();
+            if (countermoves[prev_piece][prev_to].move == move.move) {
+                return 18000;  // Just below killer moves
+            }
+        }
+    }
+    
+    // Continuation History bonus
+    if (ply > 0) {
+        Move prev_move = pv_table[ply - 1][0];
+        if (prev_move.move != 0) {
+            int prev_piece = prev_move.get_piece();
+            int prev_to = prev_move.get_to();
+            int piece = move.get_piece();
+            int to = move.get_to();
+            int cont_bonus = continuation_history[prev_piece][prev_to][piece][to];
+            if (cont_bonus > 0) {
+                return 17000 + cont_bonus;  // Between countermove and killer
+            }
+        }
+    }
+    
     // Winning captures (SEE-based) - Critical improvement
     if (move.is_capture()) {
         int see_score = see_capture(pos, move);
         if (see_score >= 0) {
-            return 50000 + see_score; // Good captures
+            // Add capture history bonus
+            int piece = move.get_piece();
+            int to = move.get_to();
+            int victim = P;
+            int enemy = 1 - pos.side_to_move;
+            for (int p = 0; p < 6; p++) {
+                if (get_bit(pos.pieces[enemy][p], to)) {
+                    victim = p;
+                    break;
+                }
+            }
+            int capture_bonus = capture_history[piece][to][victim];
+            return 50000 + see_score + capture_bonus; // Good captures with history bonus
         } else {
             return 5000 + see_score; // Bad captures (search last)
         }
@@ -2992,20 +3105,12 @@ int quiescence(Position& pos, int alpha, int beta, int ply) {
     std::vector<Move> captures;
     generate_captures(pos, captures);
     
-    // Delta pruning for captures: if stand-pat + victim value + 200 < alpha, skip
+    // Phase 6: SEE pruning in quiescence
     std::vector<Move> filtered_captures;
     for (const auto& move : captures) {
         if (move.is_capture()) {
-            int victim = P;
-            int enemy = 1 - pos.side_to_move;
-            int to = move.get_to();
-            for (int p = 0; p < 6; p++) {
-                if (get_bit(pos.pieces[enemy][p], to)) {
-                    victim = p;
-                    break;
-                }
-            }
-            if (stand_pat + piece_values[victim] + 200 >= alpha) {
+            // Use SEE to filter bad captures
+            if (see_capture(pos, move) >= -50) {  // Stricter SEE threshold
                 filtered_captures.push_back(move);
             }
         } else {
@@ -3075,19 +3180,67 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int ply, bool is_p
     if (probe_tt(pos.hash_key, depth, alpha, beta, tt_score, tt_move, ply)) {
         return tt_score;
     }
+    
+    // Add decay every 4096 nodes to prevent overflow
+    if ((nodes_searched & 4095) == 0) {
+        decay_continuation_history();
+    }
 
     // Leaf node - use quiescence
     if (depth <= 0) {
         return quiescence(pos, alpha, beta, ply);
     }
 
-    // Check extension
+    // Phase 6: Check extensions
     bool in_check = false;
     U64 king_bb = pos.pieces[pos.side_to_move][K];
     if (king_bb != 0) {
         int king_sq = lsb_index(king_bb);
         in_check = is_square_attacked(pos, king_sq, 1 - pos.side_to_move);
-        if (in_check) depth++;
+        if (in_check) {
+            depth++; // Basic check extension
+            
+            // Count actual checking pieces
+            int checking_pieces = 0;
+            
+            // Check each enemy piece type
+            for (int p = P; p <= Q; p++) {
+                U64 attackers_copy = pos.pieces[1 - pos.side_to_move][p];  // Make a copy!
+                while (attackers_copy) {
+                    int sq = lsb_index(attackers_copy);
+                    pop_bit(attackers_copy, sq);  // Modify the copy, not original
+                    
+                    // Check if THIS piece attacks the king
+                    bool attacks_king = false;
+                    switch(p) {
+                        case P:
+                            if (pos.side_to_move == WHITE) {
+                                attacks_king = (sq % 8 != 0 && sq - 9 == king_sq) ||
+                                              (sq % 8 != 7 && sq - 7 == king_sq);
+                            } else {
+                                attacks_king = (sq % 8 != 0 && sq + 7 == king_sq) ||
+                                              (sq % 8 != 7 && sq + 9 == king_sq);
+                            }
+                            break;
+                        case N:
+                            attacks_king = (knight_attacks[sq] & (1ULL << king_sq)) != 0;
+                            break;
+                        case B:
+                            attacks_king = (get_bishop_attacks(sq, pos.occupancies[2]) & (1ULL << king_sq)) != 0;
+                            break;
+                        case R:
+                            attacks_king = (get_rook_attacks(sq, pos.occupancies[2]) & (1ULL << king_sq)) != 0;
+                            break;
+                        case Q:
+                            attacks_king = (get_queen_attacks(sq, pos.occupancies[2]) & (1ULL << king_sq)) != 0;
+                            break;
+                    }
+                    
+                    if (attacks_king) checking_pieces++;
+                }
+            }
+            if (checking_pieces >= 2) depth++; // Double check extension
+        }
     }
     
     // Check for repetition draw
@@ -3127,6 +3280,26 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int ply, bool is_p
                 
                 if (!has_good_capture) {
                     return q_score;  // Safe to return
+                }
+            }
+        }
+    }
+
+    // Phase 1: Probcut Pruning
+    if (depth >= 5 && !in_check && !is_pv_node) {
+        int probcut_beta = beta + PROBCUT_MARGIN;
+        // Try captures that might cause beta cutoff
+        std::vector<Move> captures;
+        generate_captures(pos, captures);
+        
+        for (const auto& cap_move : captures) {
+            if (see_capture(pos, cap_move) >= 0) {  // Only try good captures
+                BoardState state = make_move(pos, cap_move);
+                int probcut_score = -pvs_search(pos, depth - 3, -probcut_beta, -probcut_beta + 1, ply + 1, false);
+                unmake_move(pos, cap_move, state);
+                
+                if (probcut_score >= probcut_beta) {
+                    return probcut_score;
                 }
             }
         }
@@ -3218,7 +3391,33 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int ply, bool is_p
         }
     }
     
-    // Singular extensions removed - was causing false mate scores
+    // Phase 1: Singular Extensions (DISABLED - too expensive)
+    // TODO: Re-enable with proper move limit (e.g., only check first 5 moves)
+    /*
+    if (depth >= 8 && !in_check && tt_move.move != 0) {
+        int singular_beta = tt_score - SINGULAR_MARGIN * depth;
+        int singular_depth = (depth - 1) / 2;
+        
+        // Search all other moves at reduced depth
+        bool is_singular = true;
+        for (const auto& move : move_list.moves) {
+            if (move.move == tt_move.move) continue;
+            
+            BoardState state = make_move(pos, move);
+            int singular_score = -pvs_search(pos, singular_depth, -singular_beta, -singular_beta + 1, ply + 1, false);
+            unmake_move(pos, move, state);
+            
+            if (singular_score >= singular_beta) {
+                is_singular = false;
+                break;
+            }
+        }
+        
+        if (is_singular) {
+            depth++; // Extend the TT move
+        }
+    }
+    */
     
     // Sort moves
     sort_moves_enhanced(pos, move_list.moves, tt_move, ply);
@@ -3238,8 +3437,13 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int ply, bool is_p
         
         // LMR conditions: depth >= 3, not first few moves, not in check, not capture/promotion
         if (depth >= 3 && i >= 4 && !in_check && !move.is_capture() && !move.get_promo()) {
-            // BETTER LMR formula (Stockfish-inspired)
-            reduction = (int)(std::log(depth) * std::log(i) / 2.5);
+            // IMPROVED LMR formula (more aggressive as suggested in task)
+            reduction = static_cast<int>(std::log(depth) * std::log(i) / 2.0);
+            
+            // Add history-based adjustments
+            int piece = move.get_piece();
+            int to = move.get_to();
+            if (history_moves[piece][to] > 8000) reduction = std::max(0, reduction - 2);
             
             // Reduce less in PV nodes
             if (is_pv_node) reduction = std::max(0, reduction - 1);
@@ -3251,11 +3455,9 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int ply, bool is_p
             }
             
             // Reduce less for history moves
-            int piece = move.get_piece();
-            int to = move.get_to();
-            if (history_moves[piece][to] > 5000) {
-                reduction = std::max(0, reduction - 1);
-            }
+            int piece_type = move.get_piece();
+            int to_square = move.get_to();
+            if (history_moves[piece_type][to_square] > 8000) reduction = std::max(0, reduction - 2);
             
             // Cap reduction at depth - 2 (never reduce below depth 1)
             reduction = std::min(reduction, depth - 2);
@@ -3320,15 +3522,44 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int ply, bool is_p
                     history_moves[piece][to] += depth * depth;
                 }
                 
-                // Update countermove heuristic
-                if (ply > 0 && !move.is_capture()) {
-                    // Get the previous move from PV table
+                // Update Continuation History
+                if (ply > 0) {
                     Move prev_move = pv_table[ply - 1][0];
                     if (prev_move.move != 0) {
                         int prev_piece = prev_move.get_piece();
                         int prev_to = prev_move.get_to();
-                        countermoves[prev_piece][prev_to] = move;
+                        if (continuation_history[prev_piece][prev_to][piece][to] < HISTORY_MAX) {
+                            continuation_history[prev_piece][prev_to][piece][to] += depth * depth;
+                        }
                     }
+                }
+            }
+            
+            // Update Capture History Heuristic
+            if (ply < MAX_DEPTH && move.is_capture() && score >= beta) {
+                int piece = move.get_piece();
+                int to = move.get_to();
+                int victim = P;
+                int enemy = 1 - pos.side_to_move;
+                for (int p = 0; p < 6; p++) {
+                    if (get_bit(pos.pieces[enemy][p], to)) {
+                        victim = p;
+                        break;
+                    }
+                }
+                // Add clamping to prevent overflow
+                if (capture_history[piece][to][victim] < HISTORY_MAX) {
+                    capture_history[piece][to][victim] += depth * depth;
+                }
+            }
+
+            // Update countermove heuristic (MOVED OUTSIDE capture block)
+            if (ply > 0 && !move.is_capture() && score >= beta) {
+                Move prev_move = pv_table[ply - 1][0];
+                if (prev_move.move != 0) {
+                    int prev_piece = prev_move.get_piece();
+                    int prev_to = prev_move.get_to();
+                    countermoves[prev_piece][prev_to] = move;
                 }
             }
             
@@ -3445,6 +3676,17 @@ Move search_position(Position& pos) {
             // No moves available - game over
             std::cout << "info string No legal moves found - game over" << std::endl;
             break;
+        }
+        
+        // Phase 4: Early exit on forced moves
+        if (moves.moves.size() == 1) {
+            // Only one legal move, return it immediately
+            best_move = moves.moves[0];
+            std::cout << "info depth " << depth << " score cp 0 nodes " << nodes_searched
+                      << " time " << (current_time_ms() - start_time) << " pv ";
+            print_move_uci(best_move.move);
+            std::cout << std::endl;
+            return best_move;
         }
         
         Move depth_best_move;
@@ -3834,14 +4076,11 @@ void uci_loop() {
             std::string token;
             iss >> token; // Skip "go"
             
-            // STRICT 2-SECOND LIMIT: Always use 2000ms
-            time_limit = 2000;
-            
-            // Parse time control parameters (for logging/future use)
+            // Phase 4: Adaptive Time Management
             int wtime = 0, btime = 0, winc = 0, binc = 0;
             int movestogo = 40;
-            bool use_movetime = false;
             
+            // Parse time control parameters
             while (iss >> token) {
                 if (token == "wtime") {
                     iss >> wtime;
@@ -3851,28 +4090,21 @@ void uci_loop() {
                     iss >> btime;
                 } else if (token == "binc") {
                     iss >> binc;
-                } else if (token == "movetime") {
-                    iss >> time_limit;
-                    use_movetime = true;
-                    // Cap movetime at 2000ms
-                    if (time_limit > 2000) time_limit = 2000;
-                } else if (token == "depth") {
-                    int depth;
-                    iss >> depth;
-                    time_limit = 2000;  // Still respect 2-second limit
-                    use_movetime = true;
-                } else if (token == "infinite") {
-                    // ✅ ENFORCE: "infinite" limited to 2000ms
-                    time_limit = 2000;
-                    use_movetime = true;
                 } else if (token == "movestogo") {
                     iss >> movestogo;
                 }
             }
             
-            // If not using movetime/depth/infinite, enforce 950ms limit
-            if (!use_movetime) {
-                time_limit = 2000;
+            // Calculate adaptive time allocation
+            int time_left = (current_pos.side_to_move == WHITE) ? wtime : btime;
+            int increment = (current_pos.side_to_move == WHITE) ? winc : binc;
+            
+            // FIX: Only use adaptive time if time controls are provided
+            if (time_left > 0 || increment > 0) {
+                time_limit = calculate_time_for_move(time_left, increment, movestogo);
+                if (time_limit > 2000) time_limit = 2000;
+            } else {
+                time_limit = 2000;  // Default to 2 seconds
             }
             
             Move best = search_position(current_pos);
