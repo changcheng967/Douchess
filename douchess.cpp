@@ -2944,11 +2944,11 @@ int score_move_enhanced(const Position& pos, const Move& move, const Move& tt_mo
     }
     
     // Countermove bonus
-    if (ply > 0) {
+    if (ply > 0 && pv_length[ply - 1] > 0) {
         Move prev_move = pv_table[ply - 1][0];
-        if (prev_move.move != 0) {
-            int prev_piece = prev_move.get_piece();
-            int prev_to = prev_move.get_to();
+        int prev_piece = prev_move.get_piece();
+        int prev_to = prev_move.get_to();
+        if (prev_piece >= 0 && prev_piece < 6 && prev_to >= 0 && prev_to < 64) {
             if (countermoves[prev_piece][prev_to].move == move.move) {
                 return 18000;  // Just below killer moves
             }
@@ -3333,12 +3333,12 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int ply, bool is_p
                 }
                 
                 // Update countermove heuristic
-                if (ply > 0 && !move.is_capture()) {
+                if (ply > 0 && pv_length[ply - 1] > 0 && !move.is_capture()) {
                     // Get the previous move from PV table
                     Move prev_move = pv_table[ply - 1][0];
-                    if (prev_move.move != 0) {
-                        int prev_piece = prev_move.get_piece();
-                        int prev_to = prev_move.get_to();
+                    int prev_piece = prev_move.get_piece();
+                    int prev_to = prev_move.get_to();
+                    if (prev_piece >= 0 && prev_piece < 6 && prev_to >= 0 && prev_to < 64) {
                         countermoves[prev_piece][prev_to] = move;
                     }
                 }
