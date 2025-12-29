@@ -1,45 +1,66 @@
 # ♟️ Douchess (Legacy Handcrafted Edition)
 
-**Douchess** is a bitboard-based chess engine written in C++. This repository contains the final iteration of the "Classical" development phase. It features a fully functional UCI interface, a sophisticated search tree, and a complex (though cumbersome) handcrafted evaluation function.
+**Douchess** is a high-performance C++ chess engine using a **Bitboard** representation. This version marks the final milestone of the project’s "Classical" development phase, utilizing complex handcrafted evaluation and advanced search heuristics.
 
 > [!WARNING]
-> **Status: Archived / Technical Debt.** > This project has been archived. While functional, the codebase has reached a point of high complexity where manual tuning has become counter-productive. The author has opted to start a fresh project utilizing **NNUE** rather than continuing to refactor this version.
+> **Status: Archived.** > This project has been stopped and archived. While the engine is highly functional, the handcrafted evaluation (HCE) has become too difficult to scale, and the codebase contains technical debt that makes further modification exhausting. I am switching to a new engine architecture using **Stockfish-style NNUE**.
 
 ---
 
-## 🚩 State of the Code
+## 🚩 Project Retrospective & Technical Debt
 
-This project serves as a learning milestone, but it carries several structural issues that contributed to the decision to stop development:
+This cleanup represents the final state of the engine. Several factors led to the decision to archive this project:
 
-* **Handcrafted Evaluation Fatigue:** The evaluation function relies on hundreds of "magic numbers" for piece-square tables and tactical bonuses. Fine-tuning these by hand to gain ELO became an exercise in diminishing returns.
-* **Code Redundancy:** There are several **duplicate functions** and overlapping logic segments (particularly in move generation and attack detection) that make refactoring risky and exhausting.
-* **Fragile Architecture:** Due to the "hand-rolled" nature of many components, fixing a bug in one area often introduced regressions in others.
-* **Developer Burnout:** The author is tired of fixing the same architectural flaws and has decided that the transition to **NNUE** (Efficiently Updatable Neural Networks) is a more productive use of time.
-
----
-
-## 🛠️ Technical Features (As Is)
-
-Despite its flaws, the engine contains solid implementations of:
-
-* **Bitboard Engine:** Efficient 64-bit representation for all pieces and occupancies.
-* **PVS Search:** Principal Variation Search with Alpha-Beta pruning.
-* **Transposition Table:** A large, thread-safe hash table for position memoization.
-* **Search Heuristics:** Includes Aspiration Windows, Null Move Pruning, Killer Moves, and History Heuristics.
-* **UCI Support:** Compatible with standard chess GUIs for testing and play.
+* **Handcrafted Evaluation Plateau:** The `evaluate_position_tapered` function balances hundreds of "magic numbers" for material, piece-square tables, and tactical bonuses. Manually tuning these centipawn values for incremental ELO gains became counter-productive.
+* **Code Redundancy:** The codebase contains **duplicate functions** and overlapping logic, particularly within the move generation and attack detection systems (e.g., redundant ray-scanning for Bishops, Rooks, and Queens).
+* **Maintenance Fatigue:** Fixing architectural flaws in the search-evaluation interface often introduced regressions in other modules, leading to developer burnout.
 
 ---
 
-## 🚀 Transition to NNUE
+## 🚀 Engine Features
 
-The lessons learned here are being applied to a new engine project. The "Handcrafted" approach is being replaced by a neural network evaluation system because:
+Despite the maintenance challenges, Douchess implements a high-level suite of chess programming techniques:
 
-1. **Automated Tuning:** The network learns weights through training, eliminating the need for manual centipawn adjustments.
-2. **Higher Ceiling:** NNUE can understand positional nuances that are nearly impossible to code by hand.
-3. **Cleaner Logic:** Moving the "intelligence" of the engine into a network file allows the core C++ code to remain lean and focused on search speed.
+### 1. Board Representation
+
+* **Bitboard Engine:** Uses 64-bit integers to represent the board state with an **a8=0 coordinate system**.
+* **Zobrist Hashing:** A robust 64-bit hashing system for the Transposition Table, handling side-to-move, castling rights, and en-passant keys.
+
+### 2. Search & Heuristics
+
+* **Principal Variation Search (PVS):** A highly optimized version of Negamax that narrows the search window for non-PV nodes.
+* **Advanced Pruning:** Implements **Aspiration Windows**, **Null Move Pruning**, **Razoring**, and **ProbCut** to skip irrelevant branches of the search tree.
+* **Move Ordering:** Prioritizes moves using **MVV-LVA**, **Killer Moves**, **History Heuristics**, and **Static Exchange Evaluation (SEE)**.
+
+### 3. Evaluation (HCE)
+
+* **Tapered Evaluation:** Smoothly interpolates between Middlegame and Endgame scores based on the current phase of the game.
+* **Positional Nuance:** Includes specialized logic for king safety, pawn structure (passed/backward pawns), mobility, and development bonuses.
+* **Tactical Scanning:** Integrated detection for hanging pieces, trapped pieces, and tactical patterns.
+
+---
+
+## 🏗️ Architecture at a Glance
+
+```text
+├── douchess.cpp         # Monolithic source containing all engine logic
+├── init_zobrist_keys()  # High-quality PRNG for position hashing
+├── pvs_search()         # Core Principal Variation Search loop
+├── quiescence()         # Tactical search to mitigate the Horizon Effect
+└── evaluate_position()  # The handcrafted "brain" of the engine
+
+```
+
+---
+
+## ⏩ Next Steps: Moving to NNUE
+
+The lessons learned here—specifically the limits of manual centipawn tuning—are the foundation for my next project.
+
+The goal is to replace the manual `evaluate_position_tapered` with a **Neural Network Forward Pass**. This allows the engine to learn positional relationships through millions of self-play games, removing the need for manual code updates and fixing the "duplicate function" maintenance loop.
 
 ---
 
 ## 📝 License
 
-This code is provided "as-is" for educational purposes under the MIT License. No further updates or bug fixes are planned for this specific repository.
+This project is open-source and available under the MIT License. No further updates or bug fixes are planned for this repository.
