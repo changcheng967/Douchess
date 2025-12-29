@@ -1,9 +1,10 @@
-﻿#ifdef _WIN32
+#ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
 #endif
 
 #include <iostream>
+#include <intrin.h>
 #include <cstdint>
 #include <string>
 #include <array>
@@ -20,16 +21,9 @@
 #include <memory>
 #include <mutex>
 
-// ========================================
-// INSERT AT TOP: Time Management & Constants (Windows Compatible)
-// ========================================
-// MVV/LVA [Attacker][Victim]
-// MVV/LVA scoring removed - not used in current implementation
-
 // Cross-platform time function
 long long current_time_ms() {
 #ifdef _WIN32
-    // Windows-specific time implementation
     static LARGE_INTEGER frequency;
     static BOOL first = TRUE;
     if (first) {
@@ -40,42 +34,34 @@ long long current_time_ms() {
     QueryPerformanceCounter(&now);
     return (now.QuadPart * 1000) / frequency.QuadPart;
 #else
-    // Linux/Unix implementation
     auto now = std::chrono::steady_clock::now();
     return std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
 #endif
 }
 
-// ========================================
-// 1. Constants and Enums
-// ========================================
+// Constants and Enums
 typedef uint64_t U64;
 
-// Named constants for better code readability
 const int MAX_DEPTH = 64;
 const int MAX_PLY = 64;
 const int INFINITY_SCORE = 32000;
 const int MATE_SCORE = 30000;
-const int TIME_LIMIT_MS = 2000;  // 2 seconds instead of 950ms
-// NODE_CHECK_INTERVAL removed - no longer used
+const int TIME_LIMIT_MS = 2000;
 const int DELTA_PRUNING_MARGIN = 200;
-const int FUTILITY_MARGIN = 300;  // Was 200, now more conservative
-const int REVERSE_FUTILITY_MARGIN = 100;  // Was 150, now less aggressive
+const int FUTILITY_MARGIN = 300;
+const int REVERSE_FUTILITY_MARGIN = 100;
 const int HISTORY_MAX = 10000;
 const int EVAL_CLAMP_MAX = 5000;
 const int EVAL_CLAMP_MIN = -5000;
-const int ASPIRATION_WINDOW = 25;  // Narrow window for speed
+const int ASPIRATION_WINDOW = 25;
+const int MULTI_PV = 3;
+const int PROBCUT_MARGIN = 200;
+const int SINGULAR_MARGIN = 2;
 
-// Phase 1: Search Optimizations
-const int MULTI_PV = 3;  // Multi-PV search for better move ordering
-const int PROBCUT_MARGIN = 200;  // Probcut pruning margin
-const int SINGULAR_MARGIN = 2;   // Singular extension margin
-
-// Phase 4: Adaptive Time Management
 int calculate_time_for_move(int time_left, int increment, int moves_to_go) {
     int base_time = time_left / std::max(moves_to_go, 20);
     int allocated = base_time + static_cast<int>(increment * 0.75);
-    return std::min(allocated, 2000); // Cap at 2 seconds
+    return std::min(allocated, 2000);
 }
 
 // Piece types
@@ -96,9 +82,7 @@ enum {
     a1, b1, c1, d1, e1, f1, g1, h1
 };
 
-// ========================================
-// 2. Move Structure
-// ========================================
+// Move Structure
 struct Move {
     uint32_t move;
     
@@ -117,9 +101,7 @@ struct Move {
     bool is_castling() const { return (move >> 21) & 1; }
 };
 
-// ========================================
-// 3. Position and Board Structures
-// ========================================
+// Position and Board Structures
 struct Position {
     U64 pieces[2][6];
     U64 occupancies[3];
@@ -146,16 +128,13 @@ struct BoardState {
     int halfmove_clock;
 };
 
-
 struct MoveList {
     std::vector<Move> moves;
     void add_move(const Move& move) { moves.push_back(move); }
     void clear() { moves.clear(); }
 };
 
-// ========================================
-// 4. Transposition Table Structures
-// ========================================
+// Transposition Table Structures
 enum { TT_EXACT, TT_ALPHA, TT_BETA };
 
 struct TTEntry {
@@ -166,9 +145,7 @@ struct TTEntry {
     Move move;
 };
 
-// ========================================
-// 5. Global Variables
-// ========================================
+// Global Variables
 // Search control
 bool time_up = false;
 long long start_time = 0;
@@ -179,7 +156,7 @@ long long nodes_searched = 0;
 std::vector<U64> position_history;
 int halfmove_clock = 0;
 
-// Missing variable declarations
+// Search control
 std::atomic<bool> stop_search{false};
 std::atomic<int> best_depth{0};
 std::atomic<int> best_worker_score{-INFINITY_SCORE};
@@ -190,14 +167,7 @@ struct ThreadData {
 };
 std::vector<ThreadData> thread_data;
 
-// Countermove heuristic - removed due to broken implementation
-
-// ========================================
-// LAZY SMP (MULTI-THREADING)
-// ========================================
-// Countermove heuristic
-Move countermoves[6][64];  // [piece][to_square]
-// Function declarations for tactical analysis
+Move countermoves[6][64];
 int detect_hanging_pieces(const Position& pos, int color);
 int detect_threats(const Position& pos, int color);
 int detect_tactical_patterns(const Position& pos, int color);
@@ -231,9 +201,7 @@ U64 enpassant_keys[64];
 U64 castle_keys[16];
 U64 side_key;
 
-// ========================================
-// 6. Forward Declarations
-// ========================================
+// Forward Declarations
 bool is_square_attacked(const Position& pos, int square, int side);
 void unmake_move(Position& pos, const Move& move, const BoardState& state);
 int eval_mobility(const Position& pos, int color);
@@ -258,7 +226,6 @@ void print_move(const Move& move);
 void print_move_list(const MoveList& move_list);
 void print_move_uci(int move_int);
 void init_zobrist_keys();
-
 void init_zobrist_keys() {
     // Use proper 64-bit Mersenne Twister for high-quality random numbers
     std::mt19937_64 rng(12345);
@@ -287,44 +254,31 @@ void init_zobrist_keys() {
 }
 
 
-// ========================================
-// 3. Bit Manipulation Functions
-// ========================================
+// Bit Manipulation Functions
 #ifdef _MSC_VER
     #include <intrin.h>
     inline int count_bits(U64 bitboard) { return (int)__popcnt64(bitboard); }
     inline int lsb_index(U64 bitboard) {
-            // CRITICAL FIX: Bounds checking for empty bitboards
-            if (bitboard == 0) return -1;
-            unsigned long index;
-            if (_BitScanForward64(&index, bitboard)) return index;
-            return -1; // Should not happen for valid bitboards
-        }
+        if (bitboard == 0) return -1;
+        unsigned long index;
+        if (_BitScanForward64(&index, bitboard)) return (int)index;
+        return -1;
+    }
 #else
     inline int count_bits(U64 bitboard) { return (int)__builtin_popcountll(bitboard); }
     inline int lsb_index(U64 bitboard) {
-        // CRITICAL FIX: Bounds checking for empty bitboards
         if (bitboard == 0) return -1;
         return __builtin_ctzll(bitboard);
     }
-    
-    // Phase 7: BMI2 optimizations removed - implementation was broken
-    // TODO: Re-implement with proper magic bitboards
 #endif
 
 inline int get_bit(U64 bitboard, int square) { return (int)((bitboard >> square) & 1ULL); }
 inline void set_bit(U64 &bitboard, int square) { bitboard |= (1ULL << square); }
 inline void pop_bit(U64 &bitboard, int square) { int bit = get_bit(bitboard, square); if (bit) bitboard ^= (1ULL << square); }
 
-// ========================================
-// 6. Position Structure (Already defined above)
-// ========================================
+// Position Structure
 
-// Forward declarations already done above
-
-// ========================================
-// CRITICAL FIX 1: Proper Position Setup
-// ========================================
+// Proper Position Setup
 
 void setup_starting_position(Position& pos) {
     // Clear everything
@@ -377,9 +331,7 @@ void setup_starting_position(Position& pos) {
     pos.hash_key = generate_hash_key(pos);
 }
 
-// ========================================
-// 7. Attack Table Initialization
-// ========================================
+// Attack Table Initialization
 void init_knight_attacks() {
     for (int square = 0; square < 64; square++) {
         U64 attacks = 0ULL;
@@ -419,9 +371,7 @@ void init_attack_tables() {
     init_king_attacks();
 }
 
-// ========================================
-// 8. Helper Functions
-// ========================================
+// Helper Functions
 U64 generate_hash_key(const Position& pos) {
     U64 key = 0ULL;
     for (int color = 0; color < 2; color++) {
@@ -454,18 +404,12 @@ void print_bitboard(U64 bitboard) {
 }
 
 std::string square_to_algebraic(int square) {
-    // CRITICAL FIX: Convert a8=0 coordinate to UCI a1=0 coordinate
-    // In a8=0 system: a8=0, h1=63
-    // In UCI a1=0 system: a1=0, h8=63
-    // So we need to flip the rank only: file stays same, rank = 7 - current_rank
     char file = 'a' + (square % 8);
-    char rank = '8' - (square / 8);  // Flip rank: 0->7, 1->6, ..., 7->0
+    char rank = '8' - (square / 8);
     return std::string(1, file) + rank;
 }
 
-// ========================================
-// 9. Move Generation (Sliding Pieces)
-// ========================================
+// Move Generation (Sliding Pieces)
 U64 get_bishop_attacks(int square, U64 block) {
     U64 attacks = 0ULL;
     int tr = square / 8, tf = square % 8;
@@ -492,21 +436,14 @@ U64 get_queen_attacks(int square, U64 block) {
 
 void generate_pawn_moves(const Position& pos, MoveList& move_list, int color) {
     if (color == WHITE) {
-        // -------------------------------------------------------------------------
-        // WHITE PAWN MOVES (Moving UP -> Decreasing Index)
-        // -------------------------------------------------------------------------
         U64 bitboard = pos.pieces[WHITE][P];
         
         while (bitboard) {
             int source_square = lsb_index(bitboard);
             
-            // 1. Single Push (Target is UP/Minus 8)
+            // Single Push
             int target_square = source_square - 8;
-            
-            // Check bounds (>=0) and emptiness
             if (!(target_square < 0) && !get_bit(pos.occupancies[2], target_square)) {
-                
-                // PROMOTION (Rank 8 is Indices 0-7)
                 if (source_square >= a7 && source_square <= h7) {
                     move_list.add_move(Move(source_square, target_square, P, Q, false));
                     move_list.add_move(Move(source_square, target_square, P, R, false));
@@ -514,13 +451,10 @@ void generate_pawn_moves(const Position& pos, MoveList& move_list, int color) {
                     move_list.add_move(Move(source_square, target_square, P, N, false));
                 }
                 else {
-                    // Normal Single Push
                     move_list.add_move(Move(source_square, target_square, P, 0, false));
                     
-                    // 2. Double Push
-                    // White Pawns start on Rank 2 -> Indices 48-55 (a2-h2)
+                    // Double Push
                     if (source_square >= a2 && source_square <= h2) {
-                        // Check if square - 16 is empty (target)
                         if (!get_bit(pos.occupancies[2], source_square - 16)) {
                             move_list.add_move(Move(source_square, source_square - 16, P, 0, false, true));
                         }
@@ -528,17 +462,10 @@ void generate_pawn_moves(const Position& pos, MoveList& move_list, int color) {
                 }
             }
             
-            // 3. Captures (White Captures Up-Left and Up-Right)
-            // Note: In a8=0, Left is -1, Right is +1.
-            // Up-Left: -8 -1 = -9
-            // Up-Right: -8 +1 = -7
-            
-            // Capture Left (-9)
-            // Ensure not on A file (File 0) prevents wrapping
+            // Captures
             if (source_square % 8 != 0) {
                  int capture_target = source_square - 9;
                  if (capture_target >= 0 && get_bit(pos.occupancies[BLACK], capture_target)) {
-                     // Add capture moves (include promotion checks similar to above)
                      if (source_square >= a7 && source_square <= h7) {
                          move_list.add_move(Move(source_square, capture_target, P, Q, true));
                          move_list.add_move(Move(source_square, capture_target, P, R, true));
@@ -550,8 +477,6 @@ void generate_pawn_moves(const Position& pos, MoveList& move_list, int color) {
                  }
             }
             
-            // Capture Right (-7)
-            // Ensure not on H file (File 7)
             if (source_square % 8 != 7) {
                  int capture_target = source_square - 7;
                  if (capture_target >= 0 && get_bit(pos.occupancies[BLACK], capture_target)) {
@@ -570,21 +495,14 @@ void generate_pawn_moves(const Position& pos, MoveList& move_list, int color) {
         }
     }
     else {
-        // -------------------------------------------------------------------------
-        // BLACK PAWN MOVES (Moving DOWN -> Increasing Index)
-        // -------------------------------------------------------------------------
         U64 bitboard = pos.pieces[BLACK][P];
         
         while (bitboard) {
             int source_square = lsb_index(bitboard);
             
-            // 1. Single Push (Target is DOWN/Plus 8)
+            // Single Push
             int target_square = source_square + 8;
-            
-            // Check bounds (<64) and emptiness
             if (target_square < 64 && !get_bit(pos.occupancies[2], target_square)) {
-                
-                // PROMOTION (Black pawns on rank 2 promote when moving to rank 1)
                 if (source_square >= a2 && source_square <= h2) {
                     move_list.add_move(Move(source_square, target_square, P, Q, false));
                     move_list.add_move(Move(source_square, target_square, P, R, false));
@@ -592,13 +510,10 @@ void generate_pawn_moves(const Position& pos, MoveList& move_list, int color) {
                     move_list.add_move(Move(source_square, target_square, P, N, false));
                 }
                 else {
-                    // Normal Single Push
                     move_list.add_move(Move(source_square, target_square, P, 0, false));
                     
-                    // 2. Double Push
-                    // Black Pawns start on Rank 7 -> Indices 8-15 (a7-h7)
+                    // Double Push
                     if (source_square >= a7 && source_square <= h7) {
-                        // Check if square + 16 is empty (target)
                         if (!get_bit(pos.occupancies[2], source_square + 16)) {
                             move_list.add_move(Move(source_square, source_square + 16, P, 0, false, true));
                         }
@@ -606,12 +521,7 @@ void generate_pawn_moves(const Position& pos, MoveList& move_list, int color) {
                 }
             }
             
-            // 3. Captures (Black Captures Down-Left and Down-Right)
-            // Down-Left: +8 -1 = +7
-            // Down-Right: +8 +1 = +9
-            
-            // Capture Left (+7)
-            // Ensure not on A file (File 0)
+            // Captures
             if (source_square % 8 != 0) {
                  int capture_target = source_square + 7;
                  if (capture_target < 64 && get_bit(pos.occupancies[WHITE], capture_target)) {
@@ -626,8 +536,6 @@ void generate_pawn_moves(const Position& pos, MoveList& move_list, int color) {
                  }
             }
             
-            // Capture Right (+9)
-            // Ensure not on H file (File 7)
             if (source_square % 8 != 7) {
                  int capture_target = source_square + 9;
                  if (capture_target < 64 && get_bit(pos.occupancies[WHITE], capture_target)) {
@@ -646,39 +554,33 @@ void generate_pawn_moves(const Position& pos, MoveList& move_list, int color) {
         }
     }
     
-    // -------------------------------------------------------------------------
-    // EN PASSANT CAPTURES (Both Colors)
-    // -------------------------------------------------------------------------
+    // En Passant Captures
     if (pos.en_passant_square != -1) {
         int ep_sq = pos.en_passant_square;
         
         if (color == WHITE) {
-            // White en passant: white pawn on rank 5 captures black pawn that moved from rank 7 to rank 5
-            // If en passant square is e6 (20), white pawns that can capture are at d5 (27) and f5 (29)
-            if (ep_sq % 8 != 0) {  // Not on A file
-                int left_pawn = ep_sq + 7;  // ✅ e6 (20) + 7 = 27 (d5)
+            if (ep_sq % 8 != 0) {
+                int left_pawn = ep_sq + 7;
                 if (left_pawn < 64 && get_bit(pos.pieces[WHITE][P], left_pawn)) {
                     move_list.add_move(Move(left_pawn, ep_sq, P, 0, true, false, true, false));
                 }
             }
-            if (ep_sq % 8 != 7) {  // Not on H file
-                int right_pawn = ep_sq + 9;  // ✅ e6 (20) + 9 = 29 (f5)
+            if (ep_sq % 8 != 7) {
+                int right_pawn = ep_sq + 9;
                 if (right_pawn < 64 && get_bit(pos.pieces[WHITE][P], right_pawn)) {
                     move_list.add_move(Move(right_pawn, ep_sq, P, 0, true, false, true, false));
                 }
             }
         }
         else {
-            // Black en passant: black pawn on rank 4 captures white pawn that moved from rank 2 to rank 4
-            // If en passant square is e3 (44), black pawns that can capture are at d4 (37) and f4 (39)
-            if (ep_sq % 8 != 0) {  // Not on A file
-                int left_pawn = ep_sq - 7;  // e3 - 7 = d4
+            if (ep_sq % 8 != 0) {
+                int left_pawn = ep_sq - 7;
                 if (left_pawn >= 0 && get_bit(pos.pieces[BLACK][P], left_pawn)) {
                     move_list.add_move(Move(left_pawn, ep_sq, P, 0, true, false, true, false));
                 }
             }
-            if (ep_sq % 8 != 7) {  // Not on H file
-                int right_pawn = ep_sq - 9;  // e3 - 9 = f4
+            if (ep_sq % 8 != 7) {
+                int right_pawn = ep_sq - 9;
                 if (right_pawn >= 0 && get_bit(pos.pieces[BLACK][P], right_pawn)) {
                     move_list.add_move(Move(right_pawn, ep_sq, P, 0, true, false, true, false));
                 }
@@ -1079,9 +981,7 @@ void generate_captures(const Position& pos, std::vector<Move>& captures) {
     }
 }
 
-// ========================================
-// 10. Make/Unmake Move (FIXED)
-// ========================================
+// Make/Unmake Move (FIXED)
 
 BoardState make_move(Position& pos, const Move& move) {
     BoardState state;
@@ -1089,7 +989,7 @@ BoardState make_move(Position& pos, const Move& move) {
     state.castling_rights = pos.castling_rights;
     state.en_passant_square = pos.en_passant_square;
     state.captured_piece = -1;
-    state.halfmove_clock = halfmove_clock;  // SAVE IT!
+    state.halfmove_clock = halfmove_clock;
     
     int from = move.get_from();
     int to = move.get_to();
@@ -1097,23 +997,17 @@ BoardState make_move(Position& pos, const Move& move) {
     int color = pos.side_to_move;
     int enemy_color = 1 - color;
     
-    // CRITICAL: Bounds check for move coordinates
     if (from < 0 || from > 63 || to < 0 || to > 63) {
         std::cerr << "CRITICAL ERROR: Invalid move coords " << from << "->" << to << std::endl;
         exit(1);
     }
     
-    // Update hash key - remove piece from from-square
     pos.hash_key ^= piece_keys[color][piece][from];
     
-    // Remove piece from from-square
     pop_bit(pos.pieces[color][piece], from);
     pop_bit(pos.occupancies[color], from);
     pop_bit(pos.occupancies[2], from);
     
-    // Hash verification removed from production code
-    
-    // Handle captures
     if (move.is_capture()) {
         for (int p = 0; p < 6; p++) {
             if (get_bit(pos.pieces[enemy_color][p], to)) {
@@ -1123,13 +1017,12 @@ BoardState make_move(Position& pos, const Move& move) {
                 pop_bit(pos.occupancies[enemy_color], to);
                 pop_bit(pos.occupancies[2], to);
                 
-                // FIX: Update castling rights when rook is captured
                 if (p == R) {
                     pos.hash_key ^= castle_keys[pos.castling_rights];
-                    if (to == a1) pos.castling_rights &= ~2;  // White queenside
-                    if (to == h1) pos.castling_rights &= ~1;  // White kingside
-                    if (to == a8) pos.castling_rights &= ~8;  // Black queenside
-                    if (to == h8) pos.castling_rights &= ~4;  // Black kingside
+                    if (to == a1) pos.castling_rights &= ~2;
+                    if (to == h1) pos.castling_rights &= ~1;
+                    if (to == a8) pos.castling_rights &= ~8;
+                    if (to == h8) pos.castling_rights &= ~4;
                     pos.hash_key ^= castle_keys[pos.castling_rights];
                 }
                 break;
@@ -1137,7 +1030,6 @@ BoardState make_move(Position& pos, const Move& move) {
         }
     }
     
-    // Handle en passant capture
     if (move.is_enpassant()) {
         int ep_target = to + (color == WHITE ? 8 : -8);
         for (int p = 0; p < 6; p++) {
@@ -1152,10 +1044,8 @@ BoardState make_move(Position& pos, const Move& move) {
         }
     }
     
-    // Handle castling
     if (move.is_castling()) {
-        // Move the rook
-        if (to == g1) { // White kingside
+        if (to == g1) {
             pop_bit(pos.pieces[WHITE][R], h1);
             pop_bit(pos.occupancies[WHITE], h1);
             pop_bit(pos.occupancies[2], h1);
@@ -1163,7 +1053,7 @@ BoardState make_move(Position& pos, const Move& move) {
             set_bit(pos.occupancies[WHITE], f1);
             set_bit(pos.occupancies[2], f1);
             pos.hash_key ^= piece_keys[WHITE][R][h1] ^ piece_keys[WHITE][R][f1];
-        } else if (to == c1) { // White queenside
+        } else if (to == c1) {
             pop_bit(pos.pieces[WHITE][R], a1);
             pop_bit(pos.occupancies[WHITE], a1);
             pop_bit(pos.occupancies[2], a1);
@@ -1171,7 +1061,7 @@ BoardState make_move(Position& pos, const Move& move) {
             set_bit(pos.occupancies[WHITE], d1);
             set_bit(pos.occupancies[2], d1);
             pos.hash_key ^= piece_keys[WHITE][R][a1] ^ piece_keys[WHITE][R][d1];
-        } else if (to == g8) { // Black kingside
+        } else if (to == g8) {
             pop_bit(pos.pieces[BLACK][R], h8);
             pop_bit(pos.occupancies[BLACK], h8);
             pop_bit(pos.occupancies[2], h8);
@@ -1179,7 +1069,7 @@ BoardState make_move(Position& pos, const Move& move) {
             set_bit(pos.occupancies[BLACK], f8);
             set_bit(pos.occupancies[2], f8);
             pos.hash_key ^= piece_keys[BLACK][R][h8] ^ piece_keys[BLACK][R][f8];
-        } else if (to == c8) { // Black queenside
+        } else if (to == c8) {
             pop_bit(pos.pieces[BLACK][R], a8);
             pop_bit(pos.occupancies[BLACK], a8);
             pop_bit(pos.occupancies[2], a8);
@@ -1190,15 +1080,12 @@ BoardState make_move(Position& pos, const Move& move) {
         }
     }
     
-    // Place piece on to-square
     set_bit(pos.pieces[color][piece], to);
     set_bit(pos.occupancies[color], to);
     set_bit(pos.occupancies[2], to);
     
-    // Update hash key - place piece on to-square
     pos.hash_key ^= piece_keys[color][piece][to];
     
-    // Handle promotions
     if (move.get_promo() != 0) {
         pos.hash_key ^= piece_keys[color][P][to];
         pos.hash_key ^= piece_keys[color][move.get_promo()][to];
@@ -1206,15 +1093,14 @@ BoardState make_move(Position& pos, const Move& move) {
         set_bit(pos.pieces[color][move.get_promo()], to);
     }
     
-    // Update castling rights when king/rook moves
     if (piece == K) {
         if (color == WHITE) {
             pos.hash_key ^= castle_keys[pos.castling_rights];
-            pos.castling_rights &= ~3; // Clear white castling
+            pos.castling_rights &= ~3;
             pos.hash_key ^= castle_keys[pos.castling_rights];
         } else {
             pos.hash_key ^= castle_keys[pos.castling_rights];
-            pos.castling_rights &= ~12; // Clear black castling
+            pos.castling_rights &= ~12;
             pos.hash_key ^= castle_keys[pos.castling_rights];
         }
     }
@@ -1228,16 +1114,11 @@ BoardState make_move(Position& pos, const Move& move) {
         pos.hash_key ^= castle_keys[pos.castling_rights];
     }
     
-    // Clear old en passant square from hash
     if (pos.en_passant_square >= 0 && pos.en_passant_square < 64) {
         pos.hash_key ^= enpassant_keys[pos.en_passant_square];
     }
     
-    // Handle double pawn push (set new en passant target)
     if (move.is_double_push()) {
-        // CRITICAL FIX: Calculate en passant square correctly for a8=0 system
-        // White double push: from e2 (52) to e4 (36), en passant should be e3 (44)
-        // Black double push: from e7 (12) to e5 (28), en passant should be e6 (20)
         pos.en_passant_square = (from + to) / 2;
         if (pos.en_passant_square >= 0 && pos.en_passant_square < 64) {
             pos.hash_key ^= enpassant_keys[pos.en_passant_square];
@@ -1246,18 +1127,15 @@ BoardState make_move(Position& pos, const Move& move) {
         pos.en_passant_square = -1;
     }
     
-    // Update halfmove clock for 50-move rule
     if (move.is_capture() || move.get_piece() == P) {
-        halfmove_clock = 0; // Reset on capture or pawn move
+        halfmove_clock = 0;
     } else {
-        halfmove_clock++; // Increment otherwise
+        halfmove_clock++;
     }
     
-    // Switch side to move
     pos.side_to_move = enemy_color;
     pos.hash_key ^= side_key;
     
-    // Add current position to history for repetition detection
     position_history.push_back(pos.hash_key);
     
     return state;
@@ -1272,30 +1150,29 @@ void unmake_move(Position& pos, const Move& move, const BoardState& state) {
     
     pos.side_to_move = color;
     
-    // Handle castling - move rook back first
     if (move.is_castling()) {
-        if (to == g1) { // White kingside
+        if (to == g1) {
             pop_bit(pos.pieces[WHITE][R], f1);
             pop_bit(pos.occupancies[WHITE], f1);
             pop_bit(pos.occupancies[2], f1);
             set_bit(pos.pieces[WHITE][R], h1);
             set_bit(pos.occupancies[WHITE], h1);
             set_bit(pos.occupancies[2], h1);
-        } else if (to == c1) { // White queenside
+        } else if (to == c1) {
             pop_bit(pos.pieces[WHITE][R], d1);
             pop_bit(pos.occupancies[WHITE], d1);
             pop_bit(pos.occupancies[2], d1);
             set_bit(pos.pieces[WHITE][R], a1);
             set_bit(pos.occupancies[WHITE], a1);
             set_bit(pos.occupancies[2], a1);
-        } else if (to == g8) { // Black kingside
+        } else if (to == g8) {
             pop_bit(pos.pieces[BLACK][R], f8);
             pop_bit(pos.occupancies[BLACK], f8);
             pop_bit(pos.occupancies[2], f8);
             set_bit(pos.pieces[BLACK][R], h8);
             set_bit(pos.occupancies[BLACK], h8);
             set_bit(pos.occupancies[2], h8);
-        } else if (to == c8) { // Black queenside
+        } else if (to == c8) {
             pop_bit(pos.pieces[BLACK][R], d8);
             pop_bit(pos.occupancies[BLACK], d8);
             pop_bit(pos.occupancies[2], d8);
@@ -1305,50 +1182,38 @@ void unmake_move(Position& pos, const Move& move, const BoardState& state) {
         }
     }
     
-    // ✅ FIX: Handle promotion BEFORE moving piece back
     if (move.get_promo() != 0) {
-        // Remove promoted piece from destination (e.g., queen at e8)
         pop_bit(pos.pieces[color][move.get_promo()], to);
         pop_bit(pos.occupancies[color], to);
         pop_bit(pos.occupancies[2], to);
     } else {
-        // Normal piece - remove from destination
         pop_bit(pos.pieces[color][piece], to);
         pop_bit(pos.occupancies[color], to);
         pop_bit(pos.occupancies[2], to);
     }
     
-    // Handle en passant capture - restore captured pawn
     if (move.is_enpassant() && state.captured_piece != -1) {
         int ep_target = to + (color == WHITE ? 8 : -8);
         set_bit(pos.pieces[enemy_color][state.captured_piece], ep_target);
         set_bit(pos.occupancies[enemy_color], ep_target);
         set_bit(pos.occupancies[2], ep_target);
     }
-    // Handle regular capture
     else if (move.is_capture() && state.captured_piece != -1) {
         set_bit(pos.pieces[enemy_color][state.captured_piece], to);
         set_bit(pos.occupancies[enemy_color], to);
         set_bit(pos.occupancies[2], to);
     }
     
-    // Place piece back at origin
     set_bit(pos.pieces[color][piece], from);
     set_bit(pos.occupancies[color], from);
     set_bit(pos.occupancies[2], from);
     
-    // Handle promotion - remove promoted piece, restore pawn
-    // ✅ REMOVED: Duplicate promotion handling (already done above at lines 1284-1295)
-    
-    // Restore game state
     pos.en_passant_square = state.en_passant_square;
     pos.castling_rights = state.castling_rights;
     pos.hash_key = state.hash_key;
     
-    // Restore halfmove clock
-    halfmove_clock = state.halfmove_clock;  // RESTORE IT!
+    halfmove_clock = state.halfmove_clock;
     
-    // Remove from position history (for repetition detection)
     if (!position_history.empty()) {
         position_history.pop_back();
     }
@@ -1487,9 +1352,6 @@ int eval_backward_pawns(const Position& pos);
 int eval_outposts(const Position& pos, int color);
 int eval_piece_activity(const Position& pos, int color);
 
-// ========================================
-// INSERT: Tapered Evaluation (Middlegame + Endgame)
-// ========================================
 const int mg_pawn_table[64] = {
     0,  0,  0,  0,  0,  0,  0,  0,
     5, 10, 10,-20,-20, 10, 10,  5,
@@ -3077,12 +2939,10 @@ void sort_moves_enhanced(const Position& pos, std::vector<Move>& moves, const Mo
 // ========================================
 
 int quiescence(Position& pos, int alpha, int beta, int ply) {
-    // FIXED: Check time every 128 nodes (more aggressive time management)
     if ((nodes_searched & 127) == 0) {
-        // Add 5% safety margin to prevent overshooting time limit
         if (current_time_ms() - start_time > (time_limit * 99 / 100)) {
             time_up = true;
-            return 0;  // RETURN IMMEDIATELY!
+            return 0;
         }
     }
     if (time_up) return 0;
@@ -3090,10 +2950,8 @@ int quiescence(Position& pos, int alpha, int beta, int ply) {
 
     nodes_searched++;
 
-    // Stand pat
     int stand_pat = evaluate_position_tapered(pos);
     
-    // Delta pruning: if position + queen value < alpha, skip captures (using named constant)
     if (stand_pat + piece_values[Q] + DELTA_PRUNING_MARGIN < alpha) {
         return alpha;
     }
@@ -3101,20 +2959,17 @@ int quiescence(Position& pos, int alpha, int beta, int ply) {
     if (stand_pat >= beta) return beta;
     if (stand_pat > alpha) alpha = stand_pat;
 
-    // Generate captures directly for better performance
     std::vector<Move> captures;
     generate_captures(pos, captures);
     
-    // Phase 6: SEE pruning in quiescence
     std::vector<Move> filtered_captures;
     for (const auto& move : captures) {
         if (move.is_capture()) {
-            // Use SEE to filter bad captures
-            if (see_capture(pos, move) >= -50) {  // Stricter SEE threshold
+            if (see_capture(pos, move) >= -50) {
                 filtered_captures.push_back(move);
             }
         } else {
-            filtered_captures.push_back(move);  // Keep non-captures
+            filtered_captures.push_back(move);
         }
     }
     captures = filtered_captures;
@@ -3124,14 +2979,13 @@ int quiescence(Position& pos, int alpha, int beta, int ply) {
     for (const auto& move : captures) {
         BoardState state = make_move(pos, move);
         
-        // ✅ ADD: Check if move is legal (king not in check)
-        int our_color = 1 - pos.side_to_move;  // We just switched sides
+        int our_color = 1 - pos.side_to_move;
         U64 king_bb = pos.pieces[our_color][K];
         if (king_bb != 0) {
             int king_sq = lsb_index(king_bb);
             if (is_square_attacked(pos, king_sq, pos.side_to_move)) {
                 unmake_move(pos, move, state);
-                continue;  // Skip illegal move
+                continue;
             }
         }
         
@@ -3152,65 +3006,53 @@ int quiescence(Position& pos, int alpha, int beta, int ply) {
 // REPLACE: Negamax (FIXED with Legal Moves and PV Table)
 // ========================================
 
-// Principal Variation Search (PVS) - More efficient than regular negamax
 int pvs_search(Position& pos, int depth, int alpha, int beta, int ply, bool is_pv_node) {
-    // FIXED: Check time every 128 nodes (more aggressive time management)
     if ((nodes_searched & 127) == 0) {
-        // Add 10% safety margin to prevent overshooting time limit
         if (current_time_ms() - start_time > (time_limit * 99 / 100)) {
             time_up = true;
-            return 0;  // RETURN IMMEDIATELY!
+            return 0;
         }
     }
     if (time_up) return 0;
     if (ply >= MAX_DEPTH - 1) return evaluate_position_tapered(pos);
     
-    // Initialize PV length for this ply
     pv_length[ply] = ply;
     
-    // Initialize search variables
     int flag = TT_ALPHA;
     Move best_move_found;
     
     nodes_searched++;
 
-    // Transposition table probe
     int tt_score = 0;
     Move tt_move;
     if (probe_tt(pos.hash_key, depth, alpha, beta, tt_score, tt_move, ply)) {
         return tt_score;
     }
     
-    // Add decay every 4096 nodes to prevent overflow
     if ((nodes_searched & 4095) == 0) {
         decay_continuation_history();
     }
 
-    // Leaf node - use quiescence
     if (depth <= 0) {
         return quiescence(pos, alpha, beta, ply);
     }
 
-    // Phase 6: Check extensions
     bool in_check = false;
     U64 king_bb = pos.pieces[pos.side_to_move][K];
     if (king_bb != 0) {
         int king_sq = lsb_index(king_bb);
         in_check = is_square_attacked(pos, king_sq, 1 - pos.side_to_move);
         if (in_check) {
-            depth++; // Basic check extension
+            depth++;
             
-            // Count actual checking pieces
             int checking_pieces = 0;
             
-            // Check each enemy piece type
             for (int p = P; p <= Q; p++) {
-                U64 attackers_copy = pos.pieces[1 - pos.side_to_move][p];  // Make a copy!
+                U64 attackers_copy = pos.pieces[1 - pos.side_to_move][p];
                 while (attackers_copy) {
                     int sq = lsb_index(attackers_copy);
-                    pop_bit(attackers_copy, sq);  // Modify the copy, not original
+                    pop_bit(attackers_copy, sq);
                     
-                    // Check if THIS piece attacks the king
                     bool attacks_king = false;
                     switch(p) {
                         case P:
@@ -3239,22 +3081,18 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int ply, bool is_p
                     if (attacks_king) checking_pieces++;
                 }
             }
-            if (checking_pieces >= 2) depth++; // Double check extension
+            if (checking_pieces >= 2) depth++;
         }
     }
     
-    // Check for repetition draw
     if (is_repetition(pos)) {
-        return 0; // Draw score
+        return 0;
     }
     
-    // Check 50-move rule
     if (is_fifty_move_rule()) {
-        return 0; // Draw score
+        return 0;
     }
 
-    // Razoring with verification
-    // FIX: Add named constants for razoring margins
     const int RAZOR_MARGIN_BASE = 300;
     const int RAZOR_MARGIN_DEPTH = 100;
     
@@ -3265,8 +3103,6 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int ply, bool is_p
         if (static_eval + razor_margin < alpha) {
             int q_score = quiescence(pos, alpha - razor_margin, alpha - razor_margin + 1, ply);
             if (q_score + razor_margin < alpha) {
-                // ✅ NEW: Only return if we're not in a tactical position
-                // Check if there are any good captures available
                 std::vector<Move> captures;
                 generate_captures(pos, captures);
                 
@@ -3279,21 +3115,19 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int ply, bool is_p
                 }
                 
                 if (!has_good_capture) {
-                    return q_score;  // Safe to return
+                    return q_score;
                 }
             }
         }
     }
 
-    // Phase 1: Probcut Pruning
     if (depth >= 5 && !in_check && !is_pv_node) {
         int probcut_beta = beta + PROBCUT_MARGIN;
-        // Try captures that might cause beta cutoff
         std::vector<Move> captures;
         generate_captures(pos, captures);
         
         for (const auto& cap_move : captures) {
-            if (see_capture(pos, cap_move) >= 0) {  // Only try good captures
+            if (see_capture(pos, cap_move) >= 0) {
                 BoardState state = make_move(pos, cap_move);
                 int probcut_score = -pvs_search(pos, depth - 3, -probcut_beta, -probcut_beta + 1, ply + 1, false);
                 unmake_move(pos, cap_move, state);
@@ -3305,16 +3139,13 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int ply, bool is_p
         }
     }
 
-    // Null Move Pruning with verification
     if (!is_pv_node && depth >= 3 && !in_check && ply > 0) {
-        // Don't do null move if we're in a zugzwang-prone position
-        // (only king + pawns, or very few pieces)
         int non_pawn_material = 0;
         for (int p = N; p <= Q; p++) {
             non_pawn_material += count_bits(pos.pieces[pos.side_to_move][p]) * piece_values[p];
         }
         
-        if (non_pawn_material > 400) {  // At least a knight's worth
+        if (non_pawn_material > 400) {
             pos.side_to_move = 1 - pos.side_to_move;
             pos.hash_key ^= side_key;
             
@@ -3324,9 +3155,7 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int ply, bool is_p
             pos.hash_key ^= side_key;
             
             if (null_score >= beta) {
-                // ✅ NEW: Verification search at high depths
                 if (depth >= 8) {
-                    // Do a reduced search to verify
                     int verify_score = pvs_search(pos, depth - 4, beta - 1, beta, ply, false);
                     if (verify_score >= beta) {
                         return beta;
@@ -3338,24 +3167,20 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int ply, bool is_p
         }
     }
 
-    // Mate distance pruning
     int mate_value = MATE_SCORE - ply;
     if (alpha < -mate_value) alpha = -mate_value;
     if (beta > mate_value - 1) beta = mate_value - 1;
     if (alpha >= beta) return alpha;
     
-    // Generate LEGAL moves only
     MoveList move_list = generate_legal_moves(pos);
     
-    // Terminal node detection
     if (move_list.moves.empty()) {
         if (in_check) {
-            return -MATE_SCORE + ply; // Checkmate
+            return -MATE_SCORE + ply;
         }
-        return 0; // Stalemate
+        return 0;
     }
 
-    // Futility pruning (FIXED: Use named constant)
     bool futility_pruning = false;
     if (depth <= 3 && !in_check && alpha < MATE_SCORE - 100 && beta > -MATE_SCORE + 100) {
         int static_eval = evaluate_position_tapered(pos);
@@ -3364,62 +3189,23 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int ply, bool is_p
         }
     }
     
-    // Reverse futility pruning (FIXED: Use different margin)
     if (depth >= 3 && !in_check && !is_pv_node && alpha > -MATE_SCORE + 100) {
         int static_eval = evaluate_position_tapered(pos);
         if (static_eval - REVERSE_FUTILITY_MARGIN * depth > beta) {
             return static_eval - REVERSE_FUTILITY_MARGIN * depth;
         }
     }
-    
-    // Multi-cut pruning removed - implementation was broken
-    // The current implementation tries to search without making moves, which is incorrect
-    // Multi-cut requires trying multiple moves, not just a single reduced search
 
-    // Internal Iterative Deepening (IID) - if no TT move and depth >= 4
     if (depth >= 4 && tt_move.move == 0) {
-        // Search at reduced depth to find a good move (score is discarded, only used for move ordering)
         int iid_depth = depth - 2;
         (void)-pvs_search(pos, iid_depth, -beta, -alpha, ply + 1, false);
-        // Probe TT to get the move from the IID search
         Move iid_move;
         int dummy_score;
         if (probe_tt(pos.hash_key, iid_depth, alpha, beta, dummy_score, iid_move, ply)) {
-            // FIX: Always use IID move for sorting, regardless of score
-            // The IID search is meant to find a good move for ordering
             tt_move = iid_move;
         }
     }
     
-    // Phase 1: Singular Extensions (DISABLED - too expensive)
-    // TODO: Re-enable with proper move limit (e.g., only check first 5 moves)
-    /*
-    if (depth >= 8 && !in_check && tt_move.move != 0) {
-        int singular_beta = tt_score - SINGULAR_MARGIN * depth;
-        int singular_depth = (depth - 1) / 2;
-        
-        // Search all other moves at reduced depth
-        bool is_singular = true;
-        for (const auto& move : move_list.moves) {
-            if (move.move == tt_move.move) continue;
-            
-            BoardState state = make_move(pos, move);
-            int singular_score = -pvs_search(pos, singular_depth, -singular_beta, -singular_beta + 1, ply + 1, false);
-            unmake_move(pos, move, state);
-            
-            if (singular_score >= singular_beta) {
-                is_singular = false;
-                break;
-            }
-        }
-        
-        if (is_singular) {
-            depth++; // Extend the TT move
-        }
-    }
-    */
-    
-    // Sort moves
     sort_moves_enhanced(pos, move_list.moves, tt_move, ply);
 
     bool searched_first_move = false;
@@ -3427,76 +3213,56 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int ply, bool is_p
     for (size_t i = 0; i < move_list.moves.size(); i++) {
         const Move& move = move_list.moves[i];
         
-        // Skip quiet moves if futility pruning is active (FIXED: Remove redundant !in_check)
         if (futility_pruning && !move.is_capture() && !move.get_promo()) {
             continue;
         }
         
-        // LMR (Late Move Reductions) - Improved for better search efficiency
         int reduction = 0;
         
-        // LMR conditions: depth >= 3, not first few moves, not in check, not capture/promotion
         if (depth >= 3 && i >= 4 && !in_check && !move.is_capture() && !move.get_promo()) {
-            // IMPROVED LMR formula (more aggressive as suggested in task)
             reduction = static_cast<int>(std::log(depth) * std::log(i) / 2.0);
             
-            // Add history-based adjustments
             int piece = move.get_piece();
             int to = move.get_to();
             if (history_moves[piece][to] > 8000) reduction = std::max(0, reduction - 2);
             
-            // Reduce less in PV nodes
             if (is_pv_node) reduction = std::max(0, reduction - 1);
             
-            // Reduce less for killer moves
             if (killer_moves[0][ply].move == move.move ||
                 killer_moves[1][ply].move == move.move) {
                 reduction = std::max(0, reduction - 1);
             }
             
-            // Reduce less for history moves
             int piece_type = move.get_piece();
             int to_square = move.get_to();
             if (history_moves[piece_type][to_square] > 8000) reduction = std::max(0, reduction - 2);
             
-            // Cap reduction at depth - 2 (never reduce below depth 1)
             reduction = std::min(reduction, depth - 2);
-            
-            // Note: All LMR reduction adjustments (PV, killer, history, depth cap)
-            // are handled in this block; no additional reduction logic is needed below.
         }
         
-        // Make the move
         BoardState state = make_move(pos, move);
 
         int score;
         
-        // PVS: First move gets full window search
         if (!searched_first_move) {
             score = -pvs_search(pos, depth - 1, -beta, -alpha, ply + 1, true);
             searched_first_move = true;
         } else {
-            // Other moves: use LMR with null window search
             if (reduction > 0) {
-                // Reduced search
                 score = -pvs_search(pos, depth - 1 - reduction, -alpha - 1, -alpha, ply + 1, false);
                 
-                // Re-search at full depth if reduced search beats alpha
                 if (score > alpha) {
                     score = -pvs_search(pos, depth - 1, -alpha - 1, -alpha, ply + 1, false);
                 }
             } else {
-                // No reduction - normal null window search
                 score = -pvs_search(pos, depth - 1, -alpha - 1, -alpha, ply + 1, false);
             }
             
-            // If score > alpha, do full window re-search
             if (score > alpha && score < beta) {
                 score = -pvs_search(pos, depth - 1, -beta, -alpha, ply + 1, true);
             }
         }
         
-        // Unmake the move (ONLY ONCE!)
         unmake_move(pos, move, state);
 
         if (time_up) return 0;
@@ -3506,7 +3272,6 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int ply, bool is_p
             flag = TT_EXACT;
             best_move_found = move;
             
-            // Update Killer Moves
             if (ply < MAX_DEPTH) {
                 if (killer_moves[0][ply].move != move.move) {
                     killer_moves[1][ply] = killer_moves[0][ply];
@@ -3514,15 +3279,13 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int ply, bool is_p
                 }
             }
             
-            // Update History Heuristic
             if (ply < MAX_DEPTH && !move.is_capture()) {
                 int piece = move.get_piece();
                 int to = move.get_to();
-                if (history_moves[piece][to] < HISTORY_MAX) { // Prevent overflow (using named constant)
+                if (history_moves[piece][to] < HISTORY_MAX) {
                     history_moves[piece][to] += depth * depth;
                 }
                 
-                // Update Continuation History
                 if (ply > 0) {
                     Move prev_move = pv_table[ply - 1][0];
                     if (prev_move.move != 0) {
@@ -3535,7 +3298,6 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int ply, bool is_p
                 }
             }
             
-            // Update Capture History Heuristic
             if (ply < MAX_DEPTH && move.is_capture() && score >= beta) {
                 int piece = move.get_piece();
                 int to = move.get_to();
@@ -3547,13 +3309,11 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int ply, bool is_p
                         break;
                     }
                 }
-                // Add clamping to prevent overflow
                 if (capture_history[piece][to][victim] < HISTORY_MAX) {
                     capture_history[piece][to][victim] += depth * depth;
                 }
             }
 
-            // Update countermove heuristic (MOVED OUTSIDE capture block)
             if (ply > 0 && !move.is_capture() && score >= beta) {
                 Move prev_move = pv_table[ply - 1][0];
                 if (prev_move.move != 0) {
@@ -3563,7 +3323,6 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int ply, bool is_p
                 }
             }
             
-            // Update PV table with overflow protection (FIXED: Correct bounds)
             pv_table[ply][0] = move;
             pv_length[ply] = 1;
             for (int i = 0; i < pv_length[ply + 1] && i < MAX_PLY - ply - 1; i++) {
@@ -3572,9 +3331,6 @@ int pvs_search(Position& pos, int depth, int alpha, int beta, int ply, bool is_p
             }
             
             if (alpha >= beta) {
-                // Countermove table removed - current implementation is broken
-                // Proper countermove tracking requires move history which isn't implemented
-                
                 record_tt(pos.hash_key, beta, TT_BETA, depth, move, ply);
                 return beta;
             }
@@ -4149,4 +3905,3 @@ int main() {
     
     return 0;
 }
-
